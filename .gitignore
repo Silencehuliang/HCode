@@ -8,3 +8,6 @@ dist/
 
 # PowerShell 在仓库根目录留下的模块分析缓存(运行 run_command 的副产物)
 Microsoft/
+
+# 临时脚手架目录,用完即删
+_scratch*/

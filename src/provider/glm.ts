@@ -1,5 +1,5 @@
 import type { Message, Provider, ProviderRequest, ProviderResponse } from './types.js';
-import { fetchTransport, type Transport } from './transport.js';
+import { createHttpTransport, type Transport } from './transport.js';
 
 export type GlmConfig = {
   apiKey: string;
@@ -103,7 +103,7 @@ function parseReply(parsed: WireReply): ProviderResponse {
 }
 
 export function createGlmProvider(config: GlmConfig): Provider {
-  const transport = config.transport ?? fetchTransport;
+  const transport = config.transport ?? createHttpTransport();
   const baseUrl = (config.baseUrl ?? GLM_DEFAULT_BASE_URL).replace(/\/+$/, '');
 
   return {
