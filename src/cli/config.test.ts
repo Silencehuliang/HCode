@@ -105,3 +105,21 @@ test('settings.json 格式坏了时,指出是哪个文件和什么问题', (t) =
   assert.ok(outcome.message.includes(settingsPath(home)), `要说清是哪个文件坏了。实际给出:\n${outcome.message}`);
   assert.match(outcome.message, /JSON/, `要指出是格式问题,而不是笼统的"没有配置"。实际给出:\n${outcome.message}`);
 });
+
+test('settings.json 带 UTF-8 BOM 时照样读得出来', (t) => {
+  // PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写入 BOM,记事本也会。
+  // JSON.parse 遇到 BOM 直接抛 —— 而 Windows 用户按教程用 PowerShell 写配置,
+  // 撞上的就是这个。这不是边角情况,是这条路径上最常见的一种。
+  const home = makeHome(
+    t,
+    '\uFEFF' + JSON.stringify({ provider: 'glm', providers: { glm: { apiKey: '密钥-1' } } }),
+  );
+
+  const outcome = loadConfig({ home, env: {} });
+
+  assert.equal(
+    outcome.ok,
+    true,
+    `带 BOM 的配置读不出来,用户会看到"你的配置不是合法 JSON",而他什么都没写错。实际:${JSON.stringify(outcome)}`,
+  );
+});

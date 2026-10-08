@@ -56,7 +56,10 @@ function readSettings(path: string): SettingsRead {
   }
 
   try {
-    return { ok: true, settings: JSON.parse(text) as SettingsFile };
+    // 去掉 UTF-8 BOM。PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写它,
+    // 记事本也会 —— 而 Windows 用户按教程用 PowerShell 写配置,撞上的就是这个。
+    // JSON.parse 对 BOM 是直接抛错,消息还是"意外的记号",没法自己看出来。
+    return { ok: true, settings: JSON.parse(text.replace(/^﻿/, '')) as SettingsFile };
   } catch (error) {
     // 文件在,但读不动。这里**不能**当成"没有配置":那会把用户已经写好的东西
     // 静默忽略,然后给他看一段"你还没配置"的引导 —— 他会照着再写一遍。
