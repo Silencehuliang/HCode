@@ -20,9 +20,13 @@ hcode 把命令交给 `powershell.exe` 执行。它不支持 bash、cmd 或 WSL,
 
 ## 安装
 
+hcode 还没发布到 npm registry,暂时从源码装:
+
 ```powershell
-npm i -g hcode
+npm i -g github:Silencehuliang/HCode
 ```
+
+(发布之后这里会改成 `npm i -g hcode`。)
 
 ## 配置
 
@@ -56,6 +60,8 @@ hcode · glm / glm-5.3
 用自然语言说要做什么就行,`/exit` 退出。
 
 ### 换一家
+
+先说一句把握程度:GLM 与 DeepSeek 的适配器对着真实端点验证过;Claude 的适配器已实现、并按 Anthropic 文档的形状做了单元测试,但**从未对着真实 Anthropic 端点跑过** —— 手上有密钥的话,试一轮只花你一次往返,开个 issue 告诉我们行不行会很有价值。
 
 三家可以共存在同一份配置里,改 `provider` 就切换:
 

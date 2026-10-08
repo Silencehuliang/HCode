@@ -20,9 +20,13 @@ The 5.1 floor matters for the model, not for you: 5.1 has no `&&`, no `??`, and 
 
 ## Install
 
+hcode is not yet on the npm registry. Install from source for now:
+
 ```powershell
-npm i -g hcode
+npm i -g github:Silencehuliang/HCode
 ```
+
+(Once published, this becomes `npm i -g hcode`.)
 
 ## Configure
 
@@ -56,6 +60,8 @@ hcode · glm / glm-5.3
 Type a request in plain language, `/exit` to quit.
 
 ### Other providers
+
+A note on confidence: the GLM and DeepSeek adapters are verified against live endpoints. The Claude adapter is implemented and unit-tested against hand-written fixtures from Anthropic's documented shapes, but **has never run against a real Anthropic endpoint** — if you have a key, trying it costs you one round-trip, and an issue saying whether it worked would be valuable.
 
 All three can coexist in one settings file, and you switch between them by changing `provider`:
 
