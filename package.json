@@ -1,21 +1,54 @@
 {
   "name": "hcode",
-  "version": "0.0.0",
-  "private": true,
-  "description": "开源的 AI 编程 Harness —— 面向使用国产模型的开发者,Windows 优先",
+  "version": "0.1.0",
+  "description": "开源的 AI 编程 Harness —— 面向使用国产模型的开发者,Windows 优先 / An open-source AI coding harness for Chinese developers",
   "license": "Apache-2.0",
+  "author": "Silencehuliang",
   "type": "module",
   "bin": {
     "hcode": "./dist/cli/main.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Silencehuliang/HCode.git"
+  },
+  "homepage": "https://github.com/Silencehuliang/HCode#readme",
+  "bugs": {
+    "url": "https://github.com/Silencehuliang/HCode/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "harness",
+    "cli",
+    "glm",
+    "deepseek",
+    "anthropic",
+    "windows",
+    "powershell"
+  ],
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "win32"
+  ],
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "README.zh.md"
+  ],
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test \"dist/**/*.test.js\"",
-    "hcode": "tsc && node dist/cli/main.js"
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build:dev": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run clean && npm run build:dev && node --test \"dist/**/*.test.js\"",
+    "hcode": "npm run build:dev && node dist/cli/main.js",
+    "prepublishOnly": "npm run test && npm run build"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

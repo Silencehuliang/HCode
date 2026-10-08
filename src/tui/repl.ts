@@ -194,4 +194,22 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // 退出时把提示行收干净,免得终端停在半个 prompt 上。
   process.stdout.write('\n');
+
+  // readline 关掉之后 stdin 仍然被引用着,进程于是在等一个永远不会来的输入 ——
+  // 把 stdin 接成一根不关的管道(编辑器插件、另一个程序拉起 hcode、任何不关写端的
+  // 父进程),`/exit` 之后就会挂在那里,父进程等的是一个永远不退出的子进程。
+  //
+  // 实测(各试一遍,只写 /exit 然后看进程退不退):
+  //   什么都不做     → 挂住
+  //   pause()        → 挂住      ← 只写 pause 是不够的,我一开始就错在这里
+  //   unref()        → 退出码 0
+  //   pause()+unref()→ 退出码 0
+  //   destroy()      → 退出码 0
+  // 用 pause + unref 而不是 destroy:后者会真的关掉 fd 0,在真终端里是多余的动作。
+  try {
+    process.stdin.pause();
+    process.stdin.unref();
+  } catch {
+    // 已经关掉、或者根本不是一个可以放开输入的流。到这一步已经无关紧要了。
+  }
 }

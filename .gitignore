@@ -12,3 +12,6 @@ Microsoft/
 # 临时脚手架,用完即删(目录与单文件都要挡住 —— 上一版只挡了目录,漏过一次)
 _scratch*/
 _scratch*
+
+# npm pack 的产物
+*.tgz
