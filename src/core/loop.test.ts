@@ -76,3 +76,45 @@ test('模型要求工具时,循环执行它、把结果回喂,直到模型不再
   );
   assert.ok(fedBack, '工具结果应当被回喂给模型,否则模型看不到自己命令的结果');
 });
+
+test('循环交还更新后的对话,使调用方能继续这个会话', async () => {
+  const echo = fakeTool('echo', async () => 'echoed');
+  const provider = fakeProvider(
+    { text: null, toolCalls: [{ id: 'call-1', name: 'echo', input: {} }] },
+    { text: '好了。', toolCalls: [] },
+  );
+
+  const result = await runTurn(
+    { provider, tools: [echo], system: '你是一个编程助手。' },
+    [{ role: 'user', text: '跑一下 echo' }],
+  );
+
+  assert.deepEqual(result.messages, [
+    { role: 'user', text: '跑一下 echo' },
+    {
+      role: 'assistant',
+      text: null,
+      toolCalls: [{ id: 'call-1', name: 'echo', input: {} }],
+    },
+    { role: 'tool', results: [{ id: 'call-1', output: 'echoed' }] },
+    { role: 'assistant', text: '好了。' },
+  ]);
+});
+
+test('模型反复要求工具时,循环在到达轮次上限后交还控制', async () => {
+  const forever = fakeTool('forever', async () => '再来一次');
+  const provider = fakeProvider(
+    ...Array.from({ length: 10 }, (_unused, index) => ({
+      text: null,
+      toolCalls: [{ id: `call-${index}`, name: 'forever', input: {} }],
+    })),
+  );
+
+  const result = await runTurn(
+    { provider, tools: [forever], system: '你是一个编程助手。', maxTurns: 3 },
+    [{ role: 'user', text: '一直做下去' }],
+  );
+
+  assert.equal(provider.requests.length, 3, '到达上限后不应再调用模型');
+  assert.equal(result.stoppedBecause, 'turn-limit');
+});
