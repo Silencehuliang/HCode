@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createTodoStore } from './todos.js';
 import assert from 'node:assert/strict';
 
 import { runTurn } from './loop.js';
@@ -180,7 +181,7 @@ test('加一个工具 = 写一个 handler + 在注册表里加一行,主循环�
   // 一个主循环从未听说过、也不可能有分支认识它的工具。
   const 问日期 = fakeTool('today', async () => '2026-10-08');
 
-  const tools = createToolset([...createTools(), 问日期]);
+  const tools = createToolset([...createTools({ todos: createTodoStore() }), 问日期]);
   const provider = fakeProvider(
     { text: null, toolCalls: [{ id: 'call-1', name: 'today', input: {} }] },
     { text: '今天是 2026-10-08。', toolCalls: [] },

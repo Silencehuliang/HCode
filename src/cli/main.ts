@@ -6,6 +6,7 @@ const DEFAULT_CONTEXT_BUDGET = 96_000;
 import { createGlmProvider } from '../provider/glm.js';
 import type { Provider } from '../provider/types.js';
 import { createTools } from '../tools/index.js';
+import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { loadConfig, type Session } from './config.js';
 
@@ -56,9 +57,11 @@ async function main(): Promise<number> {
   const { session } = outcome;
   process.stdout.write(banner(session));
 
+  const todos = createTodoStore();
+
   await startRepl({
     provider: createProvider(session),
-    tools: createTools(),
+    tools: createTools({ todos }),
     system: SYSTEM_PROMPT,
     budget: DEFAULT_CONTEXT_BUDGET,
   });
