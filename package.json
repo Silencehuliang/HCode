@@ -48,7 +48,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run clean && npm run build:dev && node --test \"dist/**/*.test.js\"",
     "hcode": "npm run build:dev && node dist/cli/main.js",
-    "prepublishOnly": "npm run test && npm run build"
+    "prepublishOnly": "npm run test && npm run build",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
