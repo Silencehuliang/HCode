@@ -127,7 +127,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   //   空闲时 —— 退出。
   //   有事在做时 —— 丢掉排队的、掐掉正在跑的,但**不**退出会话。用户按下它是想
   //   让这件事停下来,不是想丢掉整个对话。
-  process.on('SIGINT', () => {
+  //
+  // **必须注册在 readline 接口上。** 实测(真 ConPTY,Node 22.21.1):
+  //   - 终端模式下 readline 先截走 Ctrl+C,发的是接口上的 'SIGINT',
+  //     `process.on('SIGINT')` **不会**触发。
+  //   - 而且此时若接口上没有监听者,readline 会 pause 输入流 —— 表现为整个会话
+  //     无声无息地死掉,连后面的输入都不再响应。这个失败模式极难从表面推断。
+  // 进程上的那份留给非终端场景(输入是管道、输出是控制台),那时 readline 不在
+  // 终端模式、不截按键,进程级信号才是能到的那个。
+  const onInterrupt = (): void => {
     if (!inTurn && pending.length === 0) {
       rl.close();
       return;
@@ -135,7 +143,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     pending.length = 0;
     say('\n(正在中断…)');
     session.abort();
-  });
+  };
+
+  rl.on('SIGINT', onInterrupt);
+  process.on('SIGINT', onInterrupt);
 
   await new Promise<void>((resolve) => {
     rl.on('close', resolve);
