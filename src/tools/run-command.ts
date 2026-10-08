@@ -7,6 +7,7 @@ type CommandOutcome = {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  aborted: boolean;
   timeoutMs: number;
 };
 
@@ -74,7 +75,16 @@ function truncate(text: string): string {
   return `${text.slice(0, HEAD_CHARS)}\n… [省略 ${omitted} 字符] …\n${text.slice(-TAIL_CHARS)}`;
 }
 
-function execute(command: string, timeoutMs: number, cwd?: string): Promise<CommandOutcome> {
+type ExecutionRequest = {
+  command: string;
+  timeoutMs: number;
+  cwd?: string;
+  signal?: AbortSignal;
+};
+
+function execute(request: ExecutionRequest): Promise<CommandOutcome> {
+  const { command, timeoutMs, cwd, signal } = request;
+
   return new Promise((resolve) => {
     execFile(
       'powershell.exe',
@@ -84,13 +94,19 @@ function execute(command: string, timeoutMs: number, cwd?: string): Promise<Comm
         timeout: timeoutMs,
         maxBuffer: 8 * 1024 * 1024,
         ...(cwd ? { cwd } : {}),
+        ...(signal ? { signal } : {}),
       },
       (error, stdout, stderr) => {
+        // 中断与超时都会让 killed 为真,必须先把中断认出来 —— 否则被中断会被
+        // 谎报成超时,而模型会照着"时间不够"去调大 timeout 再试一次。
+        const aborted = error?.name === 'AbortError';
+
         resolve({
           exitCode: typeof error?.code === 'number' ? error.code : error ? 1 : 0,
           stdout: truncate(normalize(decode(stdout))),
           stderr: truncate(normalize(decode(stderr))),
-          timedOut: error?.killed === true,
+          timedOut: !aborted && error?.killed === true,
+          aborted,
           timeoutMs,
         });
       },
@@ -98,9 +114,16 @@ function execute(command: string, timeoutMs: number, cwd?: string): Promise<Comm
   });
 }
 
+/** 结尾那一行的退出码。三种收场各有各的说法 —— 混作一谈会误导模型。 */
+function exitCodeLine(outcome: CommandOutcome): string {
+  if (outcome.aborted) return 'exit code: (已被中断)';
+  if (outcome.timedOut) return 'exit code: (超时终止)';
+  return `exit code: ${outcome.exitCode}`;
+}
+
 function format(outcome: CommandOutcome): string {
   const lines = [
-    outcome.timedOut ? 'exit code: (超时终止)' : `exit code: ${outcome.exitCode}`,
+    exitCodeLine(outcome),
     '--- stdout ---',
     outcome.stdout,
     '--- stderr ---',
@@ -114,6 +137,12 @@ function format(outcome: CommandOutcome): string {
       '--- 超时 ---',
       `命令在 ${outcome.timeoutMs} 毫秒后仍未返回,进程已被终止。上面的输出可能不完整。`,
     );
+  }
+
+  // 中断同理,而且要和超时分开说:超时意味着"给的时间不够",中断意味着
+  // "人叫停了"。模型对这两者的下一步完全不同。
+  if (outcome.aborted) {
+    lines.push('--- 中断 ---', '命令在执行中被中断,进程已被终止。上面的输出可能不完整。');
   }
 
   return lines.join('\n');
@@ -144,13 +173,20 @@ export function createRunCommandTool(): Tool {
       },
     },
 
-    async run(input) {
+    async run(input, context) {
       const { command, cwd, timeout } = input as {
         command: string;
         cwd?: string;
         timeout?: unknown;
       };
-      return format(await execute(command, resolveTimeout(timeout), cwd));
+      return format(
+        await execute({
+          command,
+          timeoutMs: resolveTimeout(timeout),
+          ...(cwd ? { cwd } : {}),
+          ...(context?.signal ? { signal: context.signal } : {}),
+        }),
+      );
     },
   };
 }

@@ -118,3 +118,58 @@ test('模型反复要求工具时,循环在到达轮次上限后交还控制', a
   assert.equal(provider.requests.length, 3, '到达上限后不应再调用模型');
   assert.equal(result.stoppedBecause, 'turn-limit');
 });
+
+test('工具执行前后各报一次,使界面能实时显示它在做什么', async () => {
+  const order: string[] = [];
+  const slow = fakeTool('slow', async () => {
+    order.push('执行');
+    return '结果';
+  });
+
+  const provider = fakeProvider(
+    { text: null, toolCalls: [{ id: 'call-1', name: 'slow', input: { command: 'npm install' } }] },
+    { text: '好了。', toolCalls: [] },
+  );
+
+  await runTurn(
+    {
+      provider,
+      tools: [slow],
+      system: '你是一个编程助手。',
+      onEvent: (event) => order.push(event.type),
+    },
+    [{ role: 'user', text: '装一下依赖' }],
+  );
+
+  assert.deepEqual(
+    order,
+    ['tool-call', '执行', 'tool-result'],
+    'call 必须在工具**开始执行之前**报出 —— 报晚了,两分钟的 npm install 期间用户只能盯着空屏',
+  );
+});
+
+test('被中断时交还这一轮已经发生的对话,而不是把它丢掉', async () => {
+  const controller = new AbortController();
+  const slow = fakeTool('slow', async () => {
+    controller.abort(); // 模拟用户在这个工具跑的时候按了 Ctrl+C
+    return 'exit code: (已被中断)\n--- stdout ---\n';
+  });
+
+  const provider = fakeProvider(
+    { text: null, toolCalls: [{ id: 'call-1', name: 'slow', input: {} }] },
+    { text: '我接着做完了。', toolCalls: [] },
+  );
+
+  const result = await runTurn(
+    { provider, tools: [slow], system: '你是一个编程助手。', signal: controller.signal },
+    [{ role: 'user', text: '跑一下' }],
+  );
+
+  assert.equal(result.stoppedBecause, 'aborted');
+  assert.equal(provider.requests.length, 1, '已经中断了就不该再问模型一次');
+  assert.equal(
+    result.messages.length,
+    3,
+    '用户的话、模型的工具请求、工具的结果都要留着 —— 丢掉它们等于这一轮白跑,而用户中断往往只是想换个说法继续',
+  );
+});

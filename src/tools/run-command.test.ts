@@ -84,3 +84,20 @@ test('命令返回非零退出码时原样透传,工具不判定为失败', asyn
     '退出码必须原样交给模型 —— 工具替它判定"失败"会掩盖"命令正确但没有结果"这类情况',
   );
 });
+
+test('被中断时杀掉进程,并标明是中断而不是超时', async () => {
+  const tool = createRunCommandTool();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 500);
+
+  const output = await tool.run(
+    { command: 'Start-Sleep -Seconds 30' },
+    { signal: controller.signal },
+  );
+
+  assert.match(output, /中断/, '中断必须显式标注 —— 静默或留空会让模型以为命令跑完了');
+  assert.ok(
+    !output.includes('超时'),
+    `被中断不是超时。谎报成超时,模型会以为是自己给的时间不够,于是调大 timeout 重跑一次。\n实际输出:${output}`,
+  );
+});
