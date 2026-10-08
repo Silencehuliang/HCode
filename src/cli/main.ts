@@ -1,0 +1,65 @@
+#!/usr/bin/env node
+import { SYSTEM_PROMPT } from '../core/system-prompt.js';
+import { createGlmProvider } from '../provider/glm.js';
+import type { Provider } from '../provider/types.js';
+import { createRunCommandTool } from '../tools/run-command.js';
+import { startRepl } from '../tui/repl.js';
+import { loadConfig, type Session } from './config.js';
+
+/**
+ * 按配置造出对应的 Provider。v1 只实现了 GLM,其余两家在票 #10 —— 那时这里
+ * 会长成一个 switch,而不是现在就该有的一个表。
+ */
+function createProvider(session: Session): Provider {
+  switch (session.providerId) {
+    case 'glm':
+      return createGlmProvider({
+        apiKey: session.apiKey,
+        model: session.model,
+        ...(session.baseUrl ? { baseUrl: session.baseUrl } : {}),
+      });
+    default:
+      throw new Error(`没有 ${session.providerId} 的适配器`);
+  }
+}
+
+/**
+ * 会话横幅。当前用的是哪家 Provider、哪个模型必须一眼看得到 —— 用户不该在
+ * 以为用的是 GLM 时实际跑在别的地方。接口地址也亮出来:自建中转与本地网关
+ * 看地址才知道生效没有。
+ *
+ * 密钥不在这里,也不在任何输出里。
+ */
+function banner(session: Session): string {
+  return [
+    '',
+    `hcode · ${session.providerId} / ${session.model}`,
+    `接口:${session.baseUrl ?? '(厂商默认)'}`,
+    '',
+    '/exit 退出,Ctrl+C 中断正在跑的命令。',
+    '',
+  ].join('\n');
+}
+
+async function main(): Promise<number> {
+  // 读配置必须走 loadConfig —— 它同时负责"没配好时给出能照着做的引导"。
+  const outcome = loadConfig();
+
+  if (!outcome.ok) {
+    process.stderr.write(`${outcome.message}\n`);
+    return 1;
+  }
+
+  const { session } = outcome;
+  process.stdout.write(banner(session));
+
+  await startRepl({
+    provider: createProvider(session),
+    tools: [createRunCommandTool()],
+    system: SYSTEM_PROMPT,
+  });
+
+  return 0;
+}
+
+process.exitCode = await main();

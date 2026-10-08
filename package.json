@@ -4,13 +4,17 @@
   "private": true,
   "description": "开源的 AI 编程 Harness —— 面向使用国产模型的开发者,Windows 优先",
   "type": "module",
+  "bin": {
+    "hcode": "./dist/cli/main.js"
+  },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test \"dist/**/*.test.js\""
+    "test": "tsc && node --test \"dist/**/*.test.js\"",
+    "hcode": "tsc && node dist/cli/main.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
