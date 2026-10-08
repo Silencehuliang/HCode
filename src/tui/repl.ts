@@ -2,12 +2,15 @@ import { createInterface } from 'node:readline';
 
 import { createSession } from '../core/session.js';
 import type { LoopEvent } from '../core/loop.js';
-import type { Toolset } from '../core/toolset.js';
+import { guardToolset, type PermissionRequest } from '../core/permission.js';
+import { createToolset } from '../core/toolset.js';
+import type { Tool } from '../core/tool.js';
 import type { Provider } from '../provider/types.js';
 
 export type ReplOptions = {
   provider: Provider;
-  tools: Toolset;
+  /** 未加守门的工具。权限这一层由界面来问,因为终端在界面手上。 */
+  tools: Tool[];
   system: string;
 };
 
@@ -28,26 +31,29 @@ function renderEvent(event: LoopEvent): void {
   }
 }
 
+/** 问用户的话。要说清"要动什么",否则他没法判断。 */
+function describe(request: PermissionRequest): string {
+  const input = (request.input ?? {}) as { path?: unknown; command?: unknown };
+
+  if (typeof input.path === 'string') return `⏺ ${request.tool}  ${input.path}`;
+  if (typeof input.command === 'string') return `⏺ ${request.tool}  ${input.command}`;
+  return `⏺ ${request.tool}`;
+}
+
 /**
  * 极简交互界面。
  *
  * TUI 框架的选型已被推迟(ADR-0006),这里刻意不引入任何框架。它只做四件事:
  * 读一行、把这一行递给会话、把会话里发生的事显示出来、把控制权还回来。
  *
- * 对话状态不在这里 —— 它归 createSession,连同"一次一轮"那个不变量。这里只剩
- * 输入节奏:哪一行先、哪一行后,以及用户按 Ctrl+C 时该丢什么。
+ * 对话状态不在也不该在这里 —— 它归 createSession,连同"一次一轮"那个不变量。
+ * 但**权限确认**在这里,因为终端在它手上:只有它能拦住正在跑的那一轮、问一句、
+ * 再决定放不放行。
  *
- * 不给测试缝 —— 终端界面的快照测试极不稳定,维护成本高于收益(见规格的
- * Testing Decisions)。所以这里只放展示与输入节奏,不放判断。
+ * 不给测试缝 —— 终端界面的快照测试极不稳定(见规格的 Testing Decisions)。所以这里
+ * 只放展示与输入节奏,不放判断:该不该拦是 `decide` 那个纯函数的事。
  */
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const session = createSession({
-    provider: options.provider,
-    tools: options.tools,
-    system: options.system,
-    onEvent: renderEvent,
-  });
-
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -56,6 +62,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   /** 还没轮到处理的输入行。 */
   const pending: string[] = [];
+  /** 正在等一个 y/n 回答。它存在时,输入行归它,不进队列。 */
+  let answerWaiter: ((line: string) => void) | null = null;
+
   let draining = false;
   let inTurn = false;
   let closing = false;
@@ -63,6 +72,26 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const say = (text: string): void => {
     process.stdout.write(`${text}\n`);
   };
+
+  /**
+   * 问一次。走的是和主循环同一条输入线 —— 所以 while 等回答时,那一行必须归这里,
+   * 否则用户敲的 `y` 会被当成新的一句话发出去,而提问永远等不到答案。
+   */
+  function ask(request: PermissionRequest): Promise<boolean> {
+    say(`\n${describe(request)}`);
+    process.stdout.write('允许吗?[y/N] ');
+
+    return new Promise((resolve) => {
+      answerWaiter = (line) => resolve(/^y(es)?$/i.test(line.trim()));
+    });
+  }
+
+  const session = createSession({
+    provider: options.provider,
+    tools: guardToolset(createToolset(options.tools), { approve: ask }),
+    system: options.system,
+    onEvent: renderEvent,
+  });
 
   async function handle(text: string): Promise<void> {
     if (EXIT_COMMANDS.has(text)) {
@@ -119,6 +148,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   }
 
   rl.on('line', (line) => {
+    if (answerWaiter) {
+      const resolve = answerWaiter;
+      answerWaiter = null;
+      resolve(line);
+      return;
+    }
+
     pending.push(line.trim());
     void drain();
   });
@@ -133,14 +169,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   //     `process.on('SIGINT')` **不会**触发。
   //   - 而且此时若接口上没有监听者,readline 会 pause 输入流 —— 表现为整个会话
   //     无声无息地死掉,连后面的输入都不再响应。这个失败模式极难从表面推断。
-  // 进程上的那份留给非终端场景(输入是管道、输出是控制台),那时 readline 不在
-  // 终端模式、不截按键,进程级信号才是能到的那个。
   const onInterrupt = (): void => {
-    if (!inTurn && pending.length === 0) {
+    if (!inTurn && pending.length === 0 && !answerWaiter) {
       rl.close();
       return;
     }
     pending.length = 0;
+    // 正在等权限回答时按 Ctrl+C,等于回答"不"。否决是安全的方向。
+    answerWaiter?.('n');
     say('\n(正在中断…)');
     session.abort();
   };
