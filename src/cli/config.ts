@@ -1,12 +1,25 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { CLAUDE_DEFAULT_BASE_URL } from '../provider/claude.js';
+import { DEEPSEEK_DEFAULT_BASE_URL } from '../provider/deepseek.js';
+import { GLM_DEFAULT_BASE_URL } from '../provider/glm.js';
 
 /** 一家 Provider 的设置。三家可在同一份配置里共存,各有自己的 base URL 与代理。 */
 export type ProviderSettings = {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
+  /**
+   * 这一家专用的代理。
+   *
+   * 放在**每家**里面而不是全局,是这份配置存在的理由:用国产模型的人多半不需要
+   * 代理,要用 Claude 的人多半必须用。做成全局的话,要么逼前者也配一个,要么更糟
+   * —— 让国产模型的请求也绕一圈到国外代理去。
+   */
+  proxy?: string;
+  /** 开思维链。不填就是厂商默认(智谱实测默认开)。 */
+  thinking?: boolean;
 };
 
 /** settings.json 的形状。 */
@@ -20,6 +33,8 @@ export type Session = {
   model: string;
   apiKey: string;
   baseUrl?: string;
+  proxy?: string;
+  thinking?: boolean;
 };
 
 export type ConfigOutcome = { ok: true; session: Session } | { ok: false; message: string };
@@ -29,7 +44,7 @@ export type LoadOptions = {
   env?: Record<string, string | undefined>;
 };
 
-/** v1 只实现了 GLM,没配置时按它给引导。 */
+/** 没配置时按它给引导。国产模型优先 —— 这是这个项目存在的理由。 */
 export const DEFAULT_PROVIDER = 'glm';
 
 /** 用户级配置的落点。文档要写它,报错要说它,所以它得是一个能被引用的值。 */
@@ -38,7 +53,30 @@ export function settingsPath(home: string): string {
 }
 
 /** 每家的默认模型。用户只填密钥就能跑起来 —— 少一个必填项就少一处卡住的地方。 */
-const DEFAULT_MODELS: Record<string, string> = { glm: 'glm-5.3' };
+const DEFAULT_MODELS: Record<string, string> = {
+  glm: 'glm-5.3',
+  deepseek: 'deepseek-chat',
+  claude: 'claude-sonnet-5-5',
+};
+
+/** 每家的官方端点。适配器自己拿着这个值,这里只是复述,免得两处各写一份。 */
+const DEFAULT_BASE_URLS: Record<string, string> = {
+  glm: GLM_DEFAULT_BASE_URL,
+  deepseek: DEEPSEEK_DEFAULT_BASE_URL,
+  claude: CLAUDE_DEFAULT_BASE_URL,
+};
+
+export const KNOWN_PROVIDERS = Object.keys(DEFAULT_MODELS);
+
+/** `HCODE_THINKING=1|true|on` 之类的写法。认不出来就不表达意见。 */
+function parseBoolean(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'on', 'yes'].includes(normalized)) return true;
+  if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
+  return undefined;
+}
+
 
 type SettingsRead = { ok: true; settings: SettingsFile } | { ok: false; message: string };
 
@@ -71,11 +109,12 @@ function readSettings(path: string): SettingsRead {
 }
 
 /**
- * 第一次跑必然撞上这里,所以它得让人照着做就能过。三条缺一不可:
- * 去哪个文件、直接能抄的内容、以及密钥是明文这个事实。
+ * 第一次跑必然撞上这里,所以它得让人照着做就能过。四条缺一不可:
+ * 去哪个文件、直接能抄的内容、有哪些家可选、以及密钥是明文这个事实。
  */
 function firstRunGuidance(home: string, providerId: string): string {
   const defaultModel = DEFAULT_MODELS[providerId];
+  const known = KNOWN_PROVIDERS.includes(providerId);
 
   return [
     `还不能开始:没有找到 ${providerId} 的密钥。`,
@@ -95,12 +134,21 @@ function firstRunGuidance(home: string, providerId: string): string {
     '  }',
     '}',
     '',
-    defaultModel
-      ? `model 不填就是 ${defaultModel};要用自建中转或本地网关,在同层加一行 "baseUrl"。`
-      : `这一版只实现了 ${Object.keys(DEFAULT_MODELS).join('、')},provider 请填其中之一。`,
+    ...(defaultModel
+      ? [
+          `model 不填就是 ${defaultModel},接口地址不填就是 ${DEFAULT_BASE_URLS[providerId]}。`,
+          '要用自建中转或本地网关,在同层加一行 "baseUrl"。',
+          '',
+          `每家可以各配各的代理(国产模型多半不需要,Claude 多半必须有),` +
+            '在同层加一行 "proxy",写法 http://主机:端口。',
+        ]
+      : [`provider 只认 ${KNOWN_PROVIDERS.join('、')},请填其中之一。`]),
+    '',
+    '三家可以在同一份配置里共存,切换只改最上面那一行 "provider":',
+    `  ${known ? KNOWN_PROVIDERS.filter((id) => id !== providerId).join(' / ') : KNOWN_PROVIDERS.join(' / ')}`,
     '',
     '也可以不动文件,改用环境变量(它会压过文件):',
-    '  HCODE_API_KEY / HCODE_MODEL / HCODE_BASE_URL / HCODE_PROVIDER',
+    '  HCODE_PROVIDER / HCODE_API_KEY / HCODE_MODEL / HCODE_BASE_URL / HCODE_PROXY / HCODE_THINKING',
     '',
     '注意:密钥以明文存在上面这个文件里,与 GitHub CLI、AWS CLI 一致。',
   ].join('\n');
@@ -121,6 +169,8 @@ export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
   const apiKey = env['HCODE_API_KEY'] ?? entry.apiKey;
   const model = env['HCODE_MODEL'] ?? entry.model ?? DEFAULT_MODELS[providerId];
   const baseUrl = env['HCODE_BASE_URL'] ?? entry.baseUrl;
+  const proxy = env['HCODE_PROXY'] ?? entry.proxy;
+  const thinking = parseBoolean(env['HCODE_THINKING']) ?? entry.thinking;
 
   if (!apiKey || !model) {
     return { ok: false, message: firstRunGuidance(home, providerId) };
@@ -133,9 +183,12 @@ export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
       model,
       apiKey,
       ...(baseUrl ? { baseUrl } : {}),
+      ...(proxy ? { proxy } : {}),
+      ...(thinking !== undefined ? { thinking } : {}),
     },
   };
 }
+
 
 /**
  * skill 的搜索根目录,按优先级排列。

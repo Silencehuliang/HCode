@@ -123,3 +123,75 @@ test('settings.json 带 UTF-8 BOM 时照样读得出来', (t) => {
     `带 BOM 的配置读不出来,用户会看到"你的配置不是合法 JSON",而他什么都没写错。实际:${JSON.stringify(outcome)}`,
   );
 });
+
+test('代理与思维链是每家的设置,不是全进程的', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: {
+      glm: { apiKey: 'glm 的密钥', model: 'glm-5.3' },
+      claude: {
+        apiKey: 'claude 的密钥',
+        model: 'claude-sonnet-5-5',
+        proxy: 'http://127.0.0.1:7890',
+        thinking: true,
+      },
+    },
+  });
+
+  const withClaude = loadConfig({ home, env: { HCODE_PROVIDER: 'claude' } });
+  assert.equal(withClaude.ok, true);
+  if (!withClaude.ok) return;
+  assert.equal(withClaude.session.proxy, 'http://127.0.0.1:7890');
+  assert.equal(withClaude.session.thinking, true);
+
+  const withGlm = loadConfig({ home, env: { HCODE_PROVIDER: 'glm' } });
+  assert.equal(withGlm.ok, true);
+  if (!withGlm.ok) return;
+
+  assert.deepEqual(
+    withGlm.session,
+    { providerId: 'glm', model: 'glm-5.3', apiKey: 'glm 的密钥' },
+    '切到 GLM 不该把 Claude 那家的代理带过来 —— 用国产模型的人多半没代理,更不该被迫绕到国外',
+  );
+});
+
+test('HCODE_PROXY 与 HCODE_THINKING 压过文件里的设置', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: {
+      glm: {
+        apiKey: '密钥-1',
+        model: 'glm-5.3',
+        proxy: 'http://文件里的代理:1080',
+        thinking: true,
+      },
+    },
+  });
+
+  const outcome = loadConfig({
+    home,
+    env: { HCODE_PROXY: 'http://环境里的代理:7890', HCODE_THINKING: 'off' },
+  });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.session.proxy, 'http://环境里的代理:7890');
+  assert.equal(outcome.session.thinking, false, 'off / no / 0 / false 都要认');
+});
+
+test('思维链写了个认不出来的值,不算"关"', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: '密钥-1', model: 'glm-5.3', thinking: true } },
+  });
+
+  const outcome = loadConfig({ home, env: { HCODE_THINKING: '也许吧' } });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(
+    outcome.session.thinking,
+    true,
+    '认不出来的值要退回文件里的设置,不能悄悄解析成 false —— 用户会以为自己在用的思维链开着',
+  );
+});

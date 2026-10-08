@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { SUBAGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../core/system-prompt.js';
-import { createGlmProvider } from '../provider/glm.js';
-import type { Provider } from '../provider/types.js';
+import { createProvider } from '../provider/index.js';
 import { createExplorerTools, createTools } from '../tools/index.js';
 import { createTaskTool } from '../tools/task.js';
 import { createTodoStore } from '../core/todos.js';
@@ -17,26 +16,12 @@ const DEFAULT_CONTEXT_BUDGET = 96_000;
 const SUBAGENT_MAX_TURNS = 20;
 
 /**
- * 按配置造出对应的 Provider。v1 只实现了 GLM,其余两家在票 #10 —— 那时这里
- * 会长成一个 switch,而不是现在就该有的一个表。
- */
-function createProvider(session: Session): Provider {
-  switch (session.providerId) {
-    case 'glm':
-      return createGlmProvider({
-        apiKey: session.apiKey,
-        model: session.model,
-        ...(session.baseUrl ? { baseUrl: session.baseUrl } : {}),
-      });
-    default:
-      throw new Error(`没有 ${session.providerId} 的适配器`);
-  }
-}
-
-/**
  * 会话横幅。当前用的是哪家 Provider、哪个模型必须一眼看得到 —— 用户不该在
  * 以为用的是 GLM 时实际跑在别的地方。接口地址也亮出来:自建中转与本地网关
  * 看地址才知道生效没有。
+ *
+ * 代理只说"有没有、连哪",不说凭据 —— 代理地址里带的用户名密码是要保密的,
+ * 而 `http://用户:密码@主机:端口` 这种写法很常见。见 transport.ts 的 parseProxy。
  *
  * 密钥不在这里,也不在任何输出里。
  */
@@ -45,10 +30,27 @@ function banner(session: Session): string {
     '',
     `hcode · ${session.providerId} / ${session.model}`,
     `接口:${session.baseUrl ?? '(厂商默认)'}`,
+    ...(session.proxy ? [`代理:${redactProxy(session.proxy)}`] : []),
+    ...(session.thinking !== undefined ? [`思维链:${session.thinking ? '开' : '关'}`] : []),
     '',
     '/exit 退出,Ctrl+C 中断正在跑的命令。',
     '',
   ].join('\n');
+}
+
+/** 把代理地址里的凭据换成 `***`。它出现在屏幕上,而屏幕会被截图、会被贴进 issue。 */
+export function redactProxy(proxy: string): string {
+  try {
+    const url = new URL(proxy);
+    if (url.username || url.password) {
+      url.username = '***';
+      url.password = '';
+    }
+    return url.toString();
+  } catch {
+    // 地址本来就写坏了 —— 原样显示,让用户自己看出问题在哪,总比藏起来好。
+    return proxy;
+  }
 }
 
 async function main(): Promise<number> {
