@@ -25,17 +25,18 @@ run_command(
 )
 ```
 
-返回给模型的内容:
+返回给模型的内容(三段始终都在,即使内容为空):
 
 ```
-exit code: <N>
-
-<stdout>
-
-<stderr>
+exit code: 0
+--- stdout ---
+hello from powershell
+--- stderr ---
 ```
 
-三段都给,即使某段为空也保留标签 —— 模型需要能区分"stdout 为空"和"stderr 为空"。
+标签是必需的,不是装饰 —— 没有标签,模型无法区分"stdout 为空"和"stderr 为空"。
+
+**行尾归一化属于通道处理:** 输出里的 CRLF 统一成 LF,每段末尾的空白裁掉。PowerShell 输出 CRLF,而模型的其余输入是 LF;不归一化会让 `\r` 混进模型看到的内容里。这不违反"不解释语义"—— 和编码修复同类。
 
 ## 进程模型:每次调用一个全新进程
 

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 本地凭据与一次性产物
+.env
+.env.local
