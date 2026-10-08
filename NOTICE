@@ -1,0 +1,38 @@
+hcode
+Copyright 2026 Silencehuliang
+
+本产品依照根 [LICENSE](LICENSE) 采用 Apache License 2.0。
+
+---
+
+## 借鉴自 zai-org/ZCode
+
+Copyright 2026 Z.AI Co., Ltd
+
+Apache License 2.0 — <http://www.apache.org/licenses/LICENSE-2.0>
+仓库:<https://github.com/zai-org/ZCode>
+
+借鉴的部分:**目录分层**。hcode 的 `provider` / `core` / `cli` / `tui` 取自 ZCode
+的包分层。这件事的推理见 [docs/adr/0001](docs/adr/0001-layering-from-zcode-order-from-learn-claude-code.md)。
+
+**当前没有任何 ZCode 源码文件被逐字复制进本仓库。** 取的是结构,不是实现。
+
+引入 ZCode 源码时的硬性要求:
+
+> 任何直接引入的 ZCode 源码文件,必须**原样保留**其逐文件署名与许可声明。
+> 不得删除、改写、合并或"顺手整理"这些头注释 —— 它们是他人的版权声明,
+> 不是代码风格问题。该文件若来自带有 `NOTICE` 的发行,其署名内容一并保留。
+
+ZCode 仓库自身带有一份 `NOTICE.md`,内容以产品级的功能与风险披露为主。
+将来若确实复制其源码,需要同时评估该文件中的署名部分是否必须一并携带。
+
+## 借鉴自 shareAI-lab/learn-claude-code
+
+Copyright (c) 2024 shareAI Lab
+
+MIT License — <https://github.com/shareAI-lab/learn-claude-code>
+
+借鉴的部分:**构建顺序**。hcode 的里程碑顺序取自该项目的 s01–s17。
+同样没有源码被复制 —— 取的是"下一个做什么"的排序,不是实现。
+
+见 [docs/adr/0001](docs/adr/0001-layering-from-zcode-order-from-learn-claude-code.md)。
