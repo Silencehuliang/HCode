@@ -1,4 +1,6 @@
 import { runTurn, type LoopEvent, type TurnResult } from './loop.js';
+import { compact } from './compact.js';
+import { estimateMessageTokens } from './tokens.js';
 import type { Message, Provider } from '../provider/types.js';
 import type { Toolset } from './toolset.js';
 
@@ -7,6 +9,10 @@ export type SessionDeps = {
   tools: Toolset;
   system: string;
   maxTurns?: number;
+  /** 上下文预算(约多少 token)。给了它,才会在每轮开始前压缩。 */
+  budget?: number;
+  /** 估算方式。默认按字符粗估(见 tokens.ts)。 */
+  estimate?: (messages: Message[]) => number;
   /** 每轮进行中发生的事,交给界面显示。 */
   onEvent?: (event: LoopEvent) => void;
 };
@@ -49,6 +55,27 @@ export function createSession(deps: SessionDeps): Session {
     send(text) {
       const turn = tail.then(async () => {
         const before = messages;
+
+        // 压缩在**用户这句话进来之前**做。反过来做的话,刚说出口的这句也可能被
+        // 摘掉,而模型会表现得像没听见 —— 用户只会觉得"它怎么答非所问"。
+        if (deps.budget !== undefined) {
+          const compaction = await compact(messages, {
+            estimate: deps.estimate ?? estimateMessageTokens,
+            budget: deps.budget,
+            // 摘要走同一个 provider。失败就让它抛出去 —— 用一句占位符默默顶上,
+            // 等于把之前的对话真的丢掉,却看起来像成功了。
+            summarize: async (prompt) => {
+              const response = await deps.provider.send({
+                system: deps.system,
+                messages: [{ role: 'user', text: prompt }],
+                tools: [],
+              });
+              return response.text ?? '(模型没有返回摘要内容)';
+            },
+          });
+          messages = compaction.messages;
+        }
+
         messages = [...messages, { role: 'user', text }];
         running = new AbortController();
 

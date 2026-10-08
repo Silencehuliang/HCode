@@ -12,6 +12,8 @@ export type ReplOptions = {
   /** 未加守门的工具。权限这一层由界面来问,因为终端在界面手上。 */
   tools: Tool[];
   system: string;
+  /** 上下文预算(约多少 token)。到了就压缩。 */
+  budget?: number;
 };
 
 const EXIT_COMMANDS = new Set(['/exit', '/quit', '/q']);
@@ -91,6 +93,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     tools: guardToolset(createToolset(options.tools), { approve: ask }),
     system: options.system,
     onEvent: renderEvent,
+    ...(options.budget !== undefined ? { budget: options.budget } : {}),
   });
 
   async function handle(text: string): Promise<void> {

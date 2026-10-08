@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { SYSTEM_PROMPT } from '../core/system-prompt.js';
+
+/** 上下文预算的默认值。留出余量给模型这一轮的回答。 */
+const DEFAULT_CONTEXT_BUDGET = 96_000;
 import { createGlmProvider } from '../provider/glm.js';
 import type { Provider } from '../provider/types.js';
 import { createTools } from '../tools/index.js';
@@ -57,6 +60,7 @@ async function main(): Promise<number> {
     provider: createProvider(session),
     tools: createTools(),
     system: SYSTEM_PROMPT,
+    budget: DEFAULT_CONTEXT_BUDGET,
   });
 
   return 0;
