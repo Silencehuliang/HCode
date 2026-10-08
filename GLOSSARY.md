@@ -13,5 +13,10 @@ _Avoid_: Agent、工作台、平台、框架、"编程 agent"
 _Avoid_: 用 "Agent" 指代整个产品,或指代本仓库的任何一部分
 
 **Provider**:
-Harness 借以触达某一家模型厂商 API 的那道缝。一个厂商一个 Provider,置于同一个面向 Harness 的接口之后。
-_Avoid_: 模型、后端、客户端、适配器
+Harness 借以触达模型厂商 API 的那道缝 —— 一个接口、一处约定,只有一道。
+_Avoid_: 模型、后端、客户端
+
+**适配器**:
+填进 Provider 这道缝里的一份实现,一个厂商一个。GLM、DeepSeek、Claude 各是
+一个适配器;换一家模型 = 写一个新适配器,缝不动。
+_Avoid_: 用 "Provider" 指某家的具体实现(「GLM 的 Provider」应说「GLM 的适配器」)
