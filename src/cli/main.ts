@@ -8,6 +8,7 @@ import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
 import { createSkillTool } from '../tools/skill.js';
 import { loadConfig, skillRoots, type Session } from './config.js';
+import { loadInstructions, renderInstructionNote, renderInstructionsForModel } from './instructions.js';
 
 /** 上下文预算的默认值。留出余量给模型这一轮的回答。 */
 const DEFAULT_CONTEXT_BUDGET = 96_000;
@@ -25,13 +26,14 @@ const SUBAGENT_MAX_TURNS = 20;
  *
  * 密钥不在这里,也不在任何输出里。
  */
-function banner(session: Session): string {
+function banner(session: Session, extra: readonly string[]): string {
   return [
     '',
     `hcode · ${session.providerId} / ${session.model}`,
     `接口:${session.baseUrl ?? '(厂商默认)'}`,
     ...(session.proxy ? [`代理:${redactProxy(session.proxy)}`] : []),
     ...(session.thinking !== undefined ? [`思维链:${session.thinking ? '开' : '关'}`] : []),
+    ...extra,
     '',
     '/exit 退出,Ctrl+C 中断正在跑的命令。',
     '',
@@ -54,8 +56,10 @@ export function redactProxy(proxy: string): string {
 }
 
 async function main(): Promise<number> {
+  const cwd = process.cwd();
+
   // 读配置必须走 loadConfig —— 它同时负责"没配好时给出能照着做的引导"。
-  const outcome = loadConfig();
+  const outcome = loadConfig({ cwd });
 
   if (!outcome.ok) {
     process.stderr.write(`${outcome.message}\n`);
@@ -63,7 +67,21 @@ async function main(): Promise<number> {
   }
 
   const { session } = outcome;
-  process.stdout.write(banner(session));
+
+  // 项目约定:按 HCODE.md → CLAUDE.md → AGENTS.md 取第一个存在的。
+  // 读不动的情形要说出来 —— 静默当成"这个项目没有约定",用户会照着一份没生效的文件干活。
+  const instructions = loadInstructions(cwd);
+  for (const problem of instructions.problems) {
+    process.stderr.write(`指令文件读不出来 —— ${problem}\n`);
+  }
+
+  process.stdout.write(
+    banner(session, [
+      renderInstructionNote(instructions),
+      // 只有一份配置文件时没有歧义,不必占地方。两份以上才说得上"改了哪份生效"。
+      ...(outcome.files.length > 1 ? [`配置:${outcome.files.join('  →  ')}`] : []),
+    ]),
+  );
 
   const todos = createTodoStore();
   const provider = createProvider(session);
@@ -86,7 +104,13 @@ async function main(): Promise<number> {
   await startRepl({
     provider,
     tools: [...createTools({ todos }), task, createSkillTool(skills)],
-    system: [SYSTEM_PROMPT, renderSkillCatalog(skills.list())].filter(Boolean).join('\n\n'),
+    system: [
+      SYSTEM_PROMPT,
+      renderInstructionsForModel(instructions),
+      renderSkillCatalog(skills.list()),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
     budget: DEFAULT_CONTEXT_BUDGET,
   });
 

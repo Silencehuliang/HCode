@@ -9,5 +9,6 @@ dist/
 # PowerShell 在仓库根目录留下的模块分析缓存(运行 run_command 的副产物)
 Microsoft/
 
-# 临时脚手架目录,用完即删
+# 临时脚手架,用完即删(目录与单文件都要挡住 —— 上一版只挡了目录,漏过一次)
 _scratch*/
+_scratch*

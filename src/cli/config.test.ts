@@ -1,10 +1,18 @@
-import { test, type TestContext } from 'node:test';
+import { after, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { loadConfig, settingsPath } from './config.js';
+
+/**
+ * 项目级配置是看 `cwd` 的。绝大多数测试验的是用户级与全局行为,所以项目级目录
+ * 一律指向一个空目录 —— 否则跑测试的目录里恰好有一份 `.hcode/settings.json` 时
+ * 结果就会变。测试不该依赖它是在哪儿跑的。
+ */
+const noProject = mkdtempSync(join(tmpdir(), 'hcode-noproject-'));
+after(() => rmSync(noProject, { recursive: true, force: true }));
 
 /**
  * 每个测试一个全新的 home。配置读取对着**真实文件系统**测 —— 路径解析
@@ -15,32 +23,45 @@ function makeHome(t: TestContext, settings?: unknown): string {
   const home = mkdtempSync(join(tmpdir(), 'hcode-config-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
 
-  if (settings !== undefined) {
-    mkdirSync(join(home, '.hcode'), { recursive: true });
-    writeFileSync(
-      join(home, '.hcode', 'settings.json'),
-      typeof settings === 'string' ? settings : JSON.stringify(settings),
-    );
-  }
+  writeSettings(join(home, '.hcode'), settings);
   return home;
+}
+
+/** 项目级配置的落点:`<cwd>/.hcode/settings.json`。 */
+function makeProjectDir(t: TestContext, settings?: unknown): string {
+  const cwd = mkdtempSync(join(tmpdir(), 'hcode-project-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+
+  writeSettings(join(cwd, '.hcode'), settings);
+  return cwd;
+}
+
+function writeSettings(dir: string, settings: unknown): void {
+  if (settings === undefined) return;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'settings.json'),
+    typeof settings === 'string' ? settings : JSON.stringify(settings),
+  );
 }
 
 test('从用户级 settings.json 读出选中的 Provider', (t) => {
   const home = makeHome(t, {
     provider: 'glm',
     providers: {
-      glm: { apiKey: '密钥-1', model: 'glm-5.3', baseUrl: 'http://127.0.0.1:7863/v1' },
+      glm: { apiKey: 'key-1', model: 'glm-5.3', baseUrl: 'http://127.0.0.1:7863/v1' },
     },
   });
 
-  const outcome = loadConfig({ home, env: {} });
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
 
   assert.deepEqual(outcome, {
     ok: true,
+    files: [settingsPath(home)],
     session: {
       providerId: 'glm',
       model: 'glm-5.3',
-      apiKey: '密钥-1',
+      apiKey: 'key-1',
       baseUrl: 'http://127.0.0.1:7863/v1',
     },
   });
@@ -49,13 +70,14 @@ test('从用户级 settings.json 读出选中的 Provider', (t) => {
 test('环境变量覆盖配置文件 —— 文件先读,环境后读', (t) => {
   const home = makeHome(t, {
     provider: 'glm',
-    providers: { glm: { apiKey: '文件里的密钥', model: 'glm-5.3' } },
+    providers: { glm: { apiKey: 'file-key', model: 'glm-5.3' } },
   });
 
   const outcome = loadConfig({
+    cwd: noProject,
     home,
     env: {
-      HCODE_API_KEY: '环境里的密钥',
+      HCODE_API_KEY: 'env-key',
       HCODE_MODEL: 'glm-5.3-flash',
       HCODE_BASE_URL: 'http://127.0.0.1:9999/v1',
     },
@@ -63,10 +85,11 @@ test('环境变量覆盖配置文件 —— 文件先读,环境后读', (t) => {
 
   assert.deepEqual(outcome, {
     ok: true,
+    files: [settingsPath(home)],
     session: {
       providerId: 'glm',
       model: 'glm-5.3-flash',
-      apiKey: '环境里的密钥',
+      apiKey: 'env-key',
       baseUrl: 'http://127.0.0.1:9999/v1',
     },
   });
@@ -75,7 +98,7 @@ test('环境变量覆盖配置文件 —— 文件先读,环境后读', (t) => {
 test('完全没有配置时,给出能照着做的首次运行引导', (t) => {
   const home = makeHome(t);
 
-  const outcome = loadConfig({ home, env: {} });
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
 
   assert.equal(outcome.ok, false);
   if (outcome.ok) return;
@@ -97,7 +120,7 @@ test('完全没有配置时,给出能照着做的首次运行引导', (t) => {
 test('settings.json 格式坏了时,指出是哪个文件和什么问题', (t) => {
   const home = makeHome(t, '{ 这不是 JSON');
 
-  const outcome = loadConfig({ home, env: {} });
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
 
   assert.equal(outcome.ok, false, '格式坏了不能当成"读不到文件",否则用户的配置被静默忽略');
   if (outcome.ok) return;
@@ -112,10 +135,10 @@ test('settings.json 带 UTF-8 BOM 时照样读得出来', (t) => {
   // 撞上的就是这个。这不是边角情况,是这条路径上最常见的一种。
   const home = makeHome(
     t,
-    '\uFEFF' + JSON.stringify({ provider: 'glm', providers: { glm: { apiKey: '密钥-1' } } }),
+    '\uFEFF' + JSON.stringify({ provider: 'glm', providers: { glm: { apiKey: 'key-1' } } }),
   );
 
-  const outcome = loadConfig({ home, env: {} });
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
 
   assert.equal(
     outcome.ok,
@@ -128,9 +151,9 @@ test('代理与思维链是每家的设置,不是全进程的', (t) => {
   const home = makeHome(t, {
     provider: 'glm',
     providers: {
-      glm: { apiKey: 'glm 的密钥', model: 'glm-5.3' },
+      glm: { apiKey: 'glm-key', model: 'glm-5.3' },
       claude: {
-        apiKey: 'claude 的密钥',
+        apiKey: 'claude-key',
         model: 'claude-sonnet-5-5',
         proxy: 'http://127.0.0.1:7890',
         thinking: true,
@@ -138,19 +161,19 @@ test('代理与思维链是每家的设置,不是全进程的', (t) => {
     },
   });
 
-  const withClaude = loadConfig({ home, env: { HCODE_PROVIDER: 'claude' } });
+  const withClaude = loadConfig({ cwd: noProject, home, env: { HCODE_PROVIDER: 'claude' } });
   assert.equal(withClaude.ok, true);
   if (!withClaude.ok) return;
   assert.equal(withClaude.session.proxy, 'http://127.0.0.1:7890');
   assert.equal(withClaude.session.thinking, true);
 
-  const withGlm = loadConfig({ home, env: { HCODE_PROVIDER: 'glm' } });
+  const withGlm = loadConfig({ cwd: noProject, home, env: { HCODE_PROVIDER: 'glm' } });
   assert.equal(withGlm.ok, true);
   if (!withGlm.ok) return;
 
   assert.deepEqual(
     withGlm.session,
-    { providerId: 'glm', model: 'glm-5.3', apiKey: 'glm 的密钥' },
+    { providerId: 'glm', model: 'glm-5.3', apiKey: 'glm-key' },
     '切到 GLM 不该把 Claude 那家的代理带过来 —— 用国产模型的人多半没代理,更不该被迫绕到国外',
   );
 });
@@ -160,7 +183,7 @@ test('HCODE_PROXY 与 HCODE_THINKING 压过文件里的设置', (t) => {
     provider: 'glm',
     providers: {
       glm: {
-        apiKey: '密钥-1',
+        apiKey: 'key-1',
         model: 'glm-5.3',
         proxy: 'http://文件里的代理:1080',
         thinking: true,
@@ -169,6 +192,7 @@ test('HCODE_PROXY 与 HCODE_THINKING 压过文件里的设置', (t) => {
   });
 
   const outcome = loadConfig({
+    cwd: noProject,
     home,
     env: { HCODE_PROXY: 'http://环境里的代理:7890', HCODE_THINKING: 'off' },
   });
@@ -182,10 +206,10 @@ test('HCODE_PROXY 与 HCODE_THINKING 压过文件里的设置', (t) => {
 test('思维链写了个认不出来的值,不算"关"', (t) => {
   const home = makeHome(t, {
     provider: 'glm',
-    providers: { glm: { apiKey: '密钥-1', model: 'glm-5.3', thinking: true } },
+    providers: { glm: { apiKey: 'key-1', model: 'glm-5.3', thinking: true } },
   });
 
-  const outcome = loadConfig({ home, env: { HCODE_THINKING: '也许吧' } });
+  const outcome = loadConfig({ cwd: noProject, home, env: { HCODE_THINKING: '也许吧' } });
 
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
@@ -194,4 +218,205 @@ test('思维链写了个认不出来的值,不算"关"', (t) => {
     true,
     '认不出来的值要退回文件里的设置,不能悄悄解析成 false —— 用户会以为自己在用的思维链开着',
   );
+});
+
+test('项目级 settings.json 压过用户级,并按字段补齐', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'user-key', model: 'glm-5.3' } },
+  });
+  const cwd = makeProjectDir(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'project-key' } },
+  });
+
+  const outcome = loadConfig({ cwd, home, env: {} });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.session.apiKey, 'project-key');
+  assert.equal(
+    outcome.session.model,
+    'glm-5.3',
+    '项目级只写了密钥,其余字段从用户级补齐 —— 分层是逐字段的,不是整份替换',
+  );
+});
+
+test('两个配置文件都在时都列出来,让"改了没生效"看得出原因', (t) => {
+  const home = makeHome(t, { providers: { glm: { apiKey: 'k' } } });
+  const cwd = makeProjectDir(t, { providers: { glm: { apiKey: 'k' } } });
+
+  const outcome = loadConfig({ cwd, home, env: {} });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.files, [join(cwd, '.hcode', 'settings.json'), settingsPath(home)]);
+});
+
+test('项目级配置文件坏了就直说,不悄悄退回用户级', (t) => {
+  const home = makeHome(t, { provider: 'glm', providers: { glm: { apiKey: 'user-key' } } });
+  const cwd = makeProjectDir(t, '{ 这不是 JSON');
+
+  const outcome = loadConfig({ cwd, home, env: {} });
+
+  assert.equal(
+    outcome.ok,
+    false,
+    '项目级文件坏了却拿用户级跑起来,用户会以为自己改的项目级配置正在生效',
+  );
+  if (outcome.ok) return;
+  assert.match(outcome.message, new RegExp(join(cwd, '.hcode').replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')));
+});
+
+test('环境变量压过项目级文件', (t) => {
+  const home = makeHome(t, {});
+  const cwd = makeProjectDir(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'project-key', model: 'glm-5.3' } },
+  });
+
+  const outcome = loadConfig({
+    cwd,
+    home,
+    env: { HCODE_API_KEY: 'env-key', HCODE_MODEL: 'glm-5.3-flash' },
+  });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.session.apiKey, 'env-key');
+  assert.equal(outcome.session.model, 'glm-5.3-flash');
+});
+
+test('只导出过 ANTHROPIC_API_KEY 的人,零改动就能跑起来', (t) => {
+  // 这是这份兼容存在的理由:已经配好 Claude Code 的人 export 过这个变量,
+  // 他敲 `hcode` 就应该能直接用,不需要先写一份 hcode 自己的配置文件。
+  const outcome = loadConfig({
+    cwd: makeProjectDir(t),
+    home: makeHome(t),
+    env: { ANTHROPIC_API_KEY: 'sk-ant-xxx' },
+  });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.session.providerId, 'claude');
+  assert.equal(outcome.session.apiKey, 'sk-ant-xxx');
+});
+
+test('自动挑家时国产优先,不会因为顺手 export 过一个 Anthropic 的钥匙就跑国外模型', (t) => {
+  const pick = (env: Record<string, string>) => {
+    const outcome = loadConfig({ cwd: noProject, home: makeHome(t), env });
+    assert.equal(outcome.ok, true);
+    return outcome.ok ? outcome.session.providerId : '';
+  };
+
+  assert.equal(pick({ ANTHROPIC_API_KEY: 'a' }), 'claude');
+  assert.equal(pick({ ANTHROPIC_API_KEY: 'a', DEEPSEEK_API_KEY: 'd' }), 'deepseek');
+  assert.equal(
+    pick({ ANTHROPIC_API_KEY: 'a', DEEPSEEK_API_KEY: 'd', GLM_API_KEY: 'g' }),
+    'glm',
+  );
+});
+
+test('显式选了一家,就不再自动探测', (t) => {
+  const outcome = loadConfig({
+    cwd: noProject,
+    home: makeHome(t, { provider: 'glm' }),
+    env: { ANTHROPIC_API_KEY: 'a' },
+  });
+
+  assert.equal(
+    outcome.ok,
+    false,
+    '用户写明了用 glm 却没配 glm 的钥匙 —— 要照实说,不能自作聪明换一家跑',
+  );
+  if (outcome.ok) return;
+  assert.match(outcome.message, /glm/);
+});
+
+test('GLM_API_KEY 这类按家命名的环境变量直接可用', (t) => {
+  // 与 `set -a && . .env && set +a` 配合,这是本地网关 / 中转最省事的用法。
+  const outcome = loadConfig({
+    cwd: noProject,
+    home: makeHome(t),
+    env: {
+      GLM_API_KEY: 'g',
+      GLM_BASE_URL: 'http://127.0.0.1:7863/v1',
+      GLM_MODEL: 'glm-5.3',
+    },
+  });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.session, {
+    providerId: 'glm',
+    model: 'glm-5.3',
+    apiKey: 'g',
+    baseUrl: 'http://127.0.0.1:7863/v1',
+  });
+});
+
+test('别家的环境变量不会被当成这一家的', (t) => {
+  const outcome = loadConfig({
+    cwd: noProject,
+    home: makeHome(t),
+    env: {
+      HCODE_PROVIDER: 'claude',
+      ANTHROPIC_API_KEY: 'a',
+      GLM_BASE_URL: 'http://127.0.0.1:7863/v1',
+    },
+  });
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.session.providerId, 'claude');
+  assert.equal(
+    outcome.session.baseUrl,
+    undefined,
+    'GLM 的网关地址不能落到 Claude 头上 —— 那会把请求发去一个说不了 Anthropic 话的端点',
+  );
+});
+
+test('环境变量是空串时当作没设', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'file-key', model: 'glm-5.3' } },
+  });
+
+  const outcome = loadConfig({
+    cwd: noProject,
+    home,
+    env: { HCODE_PROVIDER: '', HCODE_API_KEY: '', HCODE_MODEL: '' },
+  });
+
+  assert.equal(
+    outcome.ok,
+    true,
+    '`.env` 里留一行空的 HCODE_PROVIDER= 很常见,它不该把已经配好的设置顶掉',
+  );
+  if (!outcome.ok) return;
+  assert.equal(outcome.session.providerId, 'glm');
+  assert.equal(outcome.session.apiKey, 'file-key');
+  assert.equal(outcome.session.model, 'glm-5.3');
+});
+
+test('密钥里混进非 ASCII 字符时,说清是第几个字', (t) => {
+  // 从网页或文档里复制密钥时带进一个全角字符是很常见的事。不在这里拦,
+  // Node 会在发请求之前抛 `Invalid character in header content ["authorization"]`
+  // —— 那句话里没有"密钥",也没有位置,用户只会去怀疑网络。
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: `sk-abc${String.fromCharCode(0xff0c)}def` } },
+  });
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.match(outcome.message, /第 7 个字符/);
+  assert.match(
+    outcome.message,
+    new RegExp(settingsPath(home).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')),
+    '要说清密钥是从哪一份文件里读出来的',
+  );
+  assert.doesNotMatch(outcome.message, /sk-abc/, '报错里不能带出密钥本身');
 });

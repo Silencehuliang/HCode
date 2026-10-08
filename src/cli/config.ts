@@ -37,10 +37,23 @@ export type Session = {
   thinking?: boolean;
 };
 
-export type ConfigOutcome = { ok: true; session: Session } | { ok: false; message: string };
+export type ConfigOutcome =
+  | {
+      ok: true;
+      session: Session;
+      /**
+       * 实际读到了哪几份配置文件,按优先级排列(压过别人的排前面)。
+       *
+       * 一个都不存在时是空数组 —— 全靠环境变量跑起来是正常情况,不是异常。
+       */
+      files: string[];
+    }
+  | { ok: false; message: string };
 
 export type LoadOptions = {
   home?: string;
+  /** 项目级配置的参照目录。默认取当前工作目录。 */
+  cwd?: string;
   env?: Record<string, string | undefined>;
 };
 
@@ -50,6 +63,16 @@ export const DEFAULT_PROVIDER = 'glm';
 /** 用户级配置的落点。文档要写它,报错要说它,所以它得是一个能被引用的值。 */
 export function settingsPath(home: string): string {
   return join(home, '.hcode', 'settings.json');
+}
+
+/**
+ * 项目级配置的落点。给一个仓库单独指定 Provider / 密钥用,压过用户级。
+ *
+ * 它落在 `.hcode/` 里而不是仓库根目录,是为了一个 `.gitignore` 条目就能挡住 ——
+ * 密钥写进项目配置是很容易发生的事,而它绝不能进版本库。
+ */
+export function projectSettingsPath(cwd: string): string {
+  return join(cwd, '.hcode', 'settings.json');
 }
 
 /** 每家的默认模型。用户只填密钥就能跑起来 —— 少一个必填项就少一处卡住的地方。 */
@@ -78,7 +101,79 @@ function parseBoolean(raw: string | undefined): boolean | undefined {
 }
 
 
-type SettingsRead = { ok: true; settings: SettingsFile } | { ok: false; message: string };
+/**
+ * 每家能直接认出来的第三方环境变量。
+ *
+ * Claude 那一行是这条兼容的主体:已经配好 Claude Code 的人 `export` 过
+ * `ANTHROPIC_API_KEY`,他敲 `hcode` 就该能跑,不需要先写一份 hcode 自己的配置文件。
+ * 另外两家没有公认的既有名字(它们的官方 SDK 各用各的),这里按厂商自己的叫法取,
+ * 顺带让 `set -a && . .env && set +a` 这种本地网关用法能直接用。
+ */
+const PROVIDER_ENV: Record<string, { apiKey: string[]; baseUrl: string[]; model: string[] }> = {
+  glm: { apiKey: ['GLM_API_KEY'], baseUrl: ['GLM_BASE_URL'], model: ['GLM_MODEL'] },
+  deepseek: {
+    apiKey: ['DEEPSEEK_API_KEY'],
+    baseUrl: ['DEEPSEEK_BASE_URL'],
+    model: ['DEEPSEEK_MODEL'],
+  },
+  claude: {
+    apiKey: ['ANTHROPIC_API_KEY'],
+    baseUrl: ['ANTHROPIC_BASE_URL'],
+    model: ['ANTHROPIC_MODEL'],
+  },
+};
+
+/**
+ * 按顺序取第一个**有值**的环境变量。
+ *
+ * 空串当作没设:`.env` 里留一行空的 `HCODE_PROVIDER=`(把某一行注释掉一半、
+ * 或让用户自己填)是最常见的写法之一。把它当成一个真的值,会得到一个空字符串的
+ * "provider",然后拿着一份空配置去引导用户 —— 而他明明配好了。
+ */
+function firstEnv(
+  env: Record<string, string | undefined>,
+  names: readonly string[],
+): string | undefined {
+  for (const name of names) {
+    const value = env[name];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/** 这一家的密钥:通用变量 > 它自己的变量 > 配置文件。 */
+function apiKeyFor(
+  providerId: string,
+  entry: ProviderSettings,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  return (
+    firstEnv(env, ['HCODE_API_KEY']) ?? firstEnv(env, PROVIDER_ENV[providerId]?.apiKey ?? []) ?? entry.apiKey
+  );
+}
+
+/**
+ * 没人明说用哪家时,看手上真有哪家的钥匙。
+ *
+ * 按 `KNOWN_PROVIDERS` 的顺序(国产在前)取第一家。这个顺序是刻意的:顺手
+ * `export` 过一个 `ANTHROPIC_API_KEY` 的人(跑 Claude Code 的人几乎都有)
+ * 不该因此被带到国外模型上去,而他手上真要是有国产模型的钥匙,那才是他想用的。
+ *
+ * 返回 undefined 表示一家都凑不出钥匙 —— 那就退回默认那家,由引导去告诉他要配什么。
+ */
+function detectProvider(
+  entries: Record<string, ProviderSettings>,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  for (const providerId of KNOWN_PROVIDERS) {
+    if (apiKeyFor(providerId, entries[providerId] ?? {}, env)) return providerId;
+  }
+  return undefined;
+}
+
+type SettingsRead =
+  | { ok: true; settings: SettingsFile; found: boolean }
+  | { ok: false; message: string };
 
 function readSettings(path: string): SettingsRead {
   let text: string;
@@ -86,7 +181,9 @@ function readSettings(path: string): SettingsRead {
     text = readFileSync(path, 'utf8');
   } catch (error) {
     // 文件不存在是正常情况 —— 第一次跑就是这样,交给引导去告诉用户建它。
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, settings: {} };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: true, settings: {}, found: false };
+    }
     return {
       ok: false,
       message: `配置文件读不了:\n\n  ${path}\n\n${(error as Error).message}`,
@@ -97,7 +194,7 @@ function readSettings(path: string): SettingsRead {
     // 去掉 UTF-8 BOM。PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写它,
     // 记事本也会 —— 而 Windows 用户按教程用 PowerShell 写配置,撞上的就是这个。
     // JSON.parse 对 BOM 是直接抛错,消息还是"意外的记号",没法自己看出来。
-    return { ok: true, settings: JSON.parse(text.replace(/^﻿/, '')) as SettingsFile };
+    return { ok: true, settings: JSON.parse(text.replace(/^﻿/, '')) as SettingsFile, found: true };
   } catch (error) {
     // 文件在,但读不动。这里**不能**当成"没有配置":那会把用户已经写好的东西
     // 静默忽略,然后给他看一段"你还没配置"的引导 —— 他会照着再写一遍。
@@ -150,36 +247,123 @@ function firstRunGuidance(home: string, providerId: string): string {
     '也可以不动文件,改用环境变量(它会压过文件):',
     '  HCODE_PROVIDER / HCODE_API_KEY / HCODE_MODEL / HCODE_BASE_URL / HCODE_PROXY / HCODE_THINKING',
     '',
+    '已经配好 Claude Code 的人不用建上面这个文件:',
+    '  你有 ANTHROPIC_API_KEY,这个变量会被直接认出来,敲 hcode 就能跑。',
+    '',
+    '要给某一个项目单独配(不改全局),在那个项目的根目录建同名文件:',
+    `  ${projectSettingsPath('<项目目录>')}  —— 它压过全局那一份。`,
+    '',
     '注意:密钥以明文存在上面这个文件里,与 GitHub CLI、AWS CLI 一致。',
+    '这个目录别提交进版本库(如果它在你负责的仓库里)。',
   ].join('\n');
+}
+
+/**
+ * 找出第一个不能进 HTTP 头的字符。
+ *
+ * 头字段的值只能是 Latin-1。不在这里拦,Node 会在**发请求之前**抛
+ * `Invalid character in header content ["x-api-key"]` —— 那句话里既没有"密钥"
+ * 也没有位置,用户根本猜不到原因(常见来源:从网页或文档里粘密钥时带进一个全角
+ * 字符或全角空格)。
+ *
+ * 检查放在读配置这里,是因为只有这里手上才有密钥,也才说得清是哪一个字符。
+ */
+function findNonLatin1(value: string): { at: number; char: string } | undefined {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 0xff) return { at: i + 1, char: value[i] ?? '' };
+  }
+  return undefined;
+}
+
+/**
+ * 密钥是从哪儿读来的。报错时说清出处,用户才知道该去改哪一份 ——
+ * 否则他会在配置文件里翻半天,而密钥其实来自一个很久以前 export 过的变量。
+ */
+function describeKeySource(
+  providerId: string,
+  entry: ProviderSettings,
+  env: Record<string, string | undefined>,
+  files: readonly string[],
+): string {
+  if (firstEnv(env, ['HCODE_API_KEY'])) return '环境变量 HCODE_API_KEY';
+  const names = PROVIDER_ENV[providerId]?.apiKey ?? [];
+  if (firstEnv(env, names)) return `环境变量 ${names.join(' / ')}`;
+  if (entry.apiKey) return files.join('  →  ');
+  return '(来路不明,请检查 HCODE_API_KEY 与配置文件)';
 }
 
 export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
   const home = options.home ?? homedir();
+  const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
-  const read = readSettings(settingsPath(home));
-  if (!read.ok) return { ok: false, message: read.message };
-  const settings = read.settings;
 
-  // 读取顺序即优先级:文件先,环境变量后。环境变量压过文件,是为了让"这一次跑
-  // 用另一份凭据"不需要改动落在盘上的东西 —— CI 与临时切换都依赖这一点。
-  const providerId = env['HCODE_PROVIDER'] ?? settings.provider ?? DEFAULT_PROVIDER;
-  const entry = settings.providers?.[providerId] ?? {};
+  // 按优先级从高到低列出要读的文件。项目级在前 —— 一个仓库可以覆盖全局设置。
+  // 按路径去重:home 恰好就是 cwd 时(有人喜欢在项目里开一个 home)别读两遍。
+  const paths = [...new Set([projectSettingsPath(cwd), settingsPath(home)])];
 
-  const apiKey = env['HCODE_API_KEY'] ?? entry.apiKey;
-  const model = env['HCODE_MODEL'] ?? entry.model ?? DEFAULT_MODELS[providerId];
-  const baseUrl = env['HCODE_BASE_URL'] ?? entry.baseUrl;
-  const proxy = env['HCODE_PROXY'] ?? entry.proxy;
+  const layers: { settings: SettingsFile }[] = [];
+  const files: string[] = [];
+  for (const path of paths) {
+    const read = readSettings(path);
+    // 任何一层坏了都直接报错。悄悄跳过坏掉的那一层,用户会看到自己写的设置
+    // 一部分生效一部分不生效,而没有任何线索说明为什么。
+    if (!read.ok) return { ok: false, message: read.message };
+    if (read.found) files.push(path);
+    layers.push({ settings: read.settings });
+  }
+
+  // 合并顺序与优先级相反:从最低的一层往上铺,高的盖住低的。
+  // 逐字段铺,不是整份替换 —— 项目级只想改密钥时,不必把 model 也抄一遍。
+  const entries: Record<string, ProviderSettings> = {};
+  for (const layer of [...layers].reverse()) {
+    for (const [id, entry] of Object.entries(layer.settings.providers ?? {})) {
+      entries[id] = { ...entries[id], ...entry };
+    }
+  }
+
+  // 明说的排前面:环境变量 > 项目级 > 用户级 > 自动探测 > 默认。
+  // 环境变量压过文件,是为了让"这一次跑用另一份凭据"不需要改动落在盘上的东西 ——
+  // CI 与临时切换都依赖这一点。
+  const chosen =
+    firstEnv(env, ['HCODE_PROVIDER']) ??
+    layers.find((layer) => layer.settings.provider)?.settings.provider ??
+    detectProvider(entries, env) ??
+    DEFAULT_PROVIDER;
+
+  const entry = entries[chosen] ?? {};
+  const apiKey = apiKeyFor(chosen, entry, env);
+  const model =
+    firstEnv(env, ['HCODE_MODEL']) ?? firstEnv(env, PROVIDER_ENV[chosen]?.model ?? []) ?? entry.model ?? DEFAULT_MODELS[chosen];
+  const baseUrl =
+    firstEnv(env, ['HCODE_BASE_URL']) ?? firstEnv(env, PROVIDER_ENV[chosen]?.baseUrl ?? []) ?? entry.baseUrl;
+  const proxy = firstEnv(env, ['HCODE_PROXY']) ?? entry.proxy;
   const thinking = parseBoolean(env['HCODE_THINKING']) ?? entry.thinking;
 
   if (!apiKey || !model) {
-    return { ok: false, message: firstRunGuidance(home, providerId) };
+    return { ok: false, message: firstRunGuidance(home, chosen) };
+  }
+
+  const bad = findNonLatin1(apiKey);
+  if (bad) {
+    return {
+      ok: false,
+      message: [
+        `密钥里第 ${bad.at} 个字符是「${bad.char}」,它不是 ASCII 字符。`,
+        '',
+        '密钥要放进 HTTP 请求头,而请求头只装得下 ASCII —— 这一条过不去,',
+        '连请求都发不出去。多半是从网页或文档里复制时带进了全角字符或全角空格,',
+        '把它删掉、或者重新复制一遍纯文本的密钥。',
+        '',
+        `密钥来自:${describeKeySource(chosen, entry, env, files)}`,
+      ].join('\n'),
+    };
   }
 
   return {
     ok: true,
+    files,
     session: {
-      providerId,
+      providerId: chosen,
       model,
       apiKey,
       ...(baseUrl ? { baseUrl } : {}),
