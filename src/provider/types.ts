@@ -1,7 +1,21 @@
 /** 对话中的一条消息。 */
 export type Message =
   | { role: 'user'; text: string }
-  | { role: 'assistant'; text: string | null; toolCalls?: ToolCallRequest[] }
+  | {
+      role: 'assistant';
+      text: string | null;
+      toolCalls?: ToolCallRequest[];
+      /**
+       * 适配器私有的续接材料:适配器写进去,下一轮由适配器读回来,core 只负责
+       * 原样带着它走,从不读它。
+       *
+       * 需要这么个格子,是因为有的厂商要求"上一轮模型的原话"必须在下一轮里原封
+       * 不动地出现 —— Anthropic 开了 extended thinking 之后就是这样,少一块就报
+       * 400。core 既不该知道 thinking 这个概念,也不该把它弄丢,于是给它一个不透
+       * 明的格子。它是 `unknown`,不是 `Thinking`,这就是"不泄漏"的落地方式。
+       */
+      vendorState?: unknown;
+    }
   | { role: 'tool'; results: ToolResult[] };
 
 /** 模型要求执行一次工具调用。 */
@@ -33,6 +47,19 @@ export type ProviderRequest = {
 export type ProviderResponse = {
   text: string | null;
   toolCalls: ToolCallRequest[];
+  /** 见 `Message` 里 assistant 的 `vendorState`:本轮产出、下一轮原样送回的续接材料。 */
+  vendorState?: unknown;
+};
+
+/**
+ * 思维链的开与关。在构造 Provider 时给,不在请求里 —— 它不是每轮变化的东西,
+ * 而且各家开关方式不同(智谱是请求体里一个 `thinking` 字段,Anthropic 是顶层
+ * 参数且要配 `budget_tokens`)。概念只有这一个,形状由各适配器自己决定。
+ */
+export type ThinkingConfig = {
+  enabled: boolean;
+  /** 思维链最多花多少 token。不给就由适配器按自己的上限取一个合理值。 */
+  budgetTokens?: number;
 };
 
 /**

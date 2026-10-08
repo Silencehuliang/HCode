@@ -69,6 +69,10 @@ export async function runTurn(
       role: 'assistant',
       text: response.text,
       ...(response.toolCalls.length > 0 ? { toolCalls: response.toolCalls } : {}),
+      // 适配器给什么就带什么,循环不读它。有的厂商要求上一轮的原话在下一轮里
+      // 原封不动地出现,丢了它下一轮会被厂商拒绝 —— 但那是适配器的事,
+      // 循环只负责别弄丢。
+      ...(response.vendorState !== undefined ? { vendorState: response.vendorState } : {}),
     });
 
     if (response.toolCalls.length === 0) {

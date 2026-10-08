@@ -5,7 +5,10 @@
 // 所以录制这件事本身要能重放 —— 换一个厂商、换一个模型,重跑一次即可。
 //
 // 用法:
-//   node scripts/record-provider-response.mjs --env-file <凭据文件> --out <夹具文件> [--base-url 覆盖]
+//   node scripts/record-provider-response.mjs --vendor <厂商> --out <夹具文件> [--env-file <凭据文件>] [--base-url 覆盖]
+//
+// 厂商决定两件事:读哪几个环境变量(`<厂商大写>_BASE_URL` / `_API_KEY` / `_MODEL`),
+// 以及夹具里导出的常量叫什么(`<厂商>` 打头)。加了第三个厂商就照着同一个命名再来一遍。
 //
 // 凭据只从 --env-file 或进程环境读,**不落进夹具**。夹具里只会写进响应体。
 
@@ -37,12 +40,22 @@ const env = args['env-file']
   ? { ...readEnvFile(args['env-file']), ...process.env }
   : process.env;
 
-const baseUrl = args['base-url'] ?? env.GLM_BASE_URL;
-const apiKey = env.GLM_API_KEY;
-const model = env.GLM_MODEL;
+const vendor = args.vendor;
+if (!vendor || !/^[a-z][a-z0-9]*$/.test(vendor)) {
+  console.error('缺少 --vendor,或厂商名不是小写字母数字(例:--vendor deepseek)。');
+  process.exit(1);
+}
+
+const envPrefix = vendor.toUpperCase();
+const baseUrl = args['base-url'] ?? env[`${envPrefix}_BASE_URL`];
+const apiKey = env[`${envPrefix}_API_KEY`];
+const model = env[`${envPrefix}_MODEL`];
 
 if (!baseUrl || !apiKey || !model) {
-  console.error('缺少 GLM_BASE_URL / GLM_API_KEY / GLM_MODEL —— 用 --env-file 指到凭据文件,或设成环境变量。');
+  console.error(
+    `缺少 ${envPrefix}_BASE_URL / ${envPrefix}_API_KEY / ${envPrefix}_MODEL —— ` +
+      '用 --env-file 指到凭据文件,或设成环境变量。',
+  );
   process.exit(1);
 }
 
@@ -51,7 +64,7 @@ const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
 /** 探测集固定:纯文本、工具调用、厂商报错 —— 适配器要解析的就是这三种形状。 */
 const probes = [
   {
-    name: 'glmText',
+    name: 'text',
     note: '模型只回文本,没有工具调用',
     body: {
       model,
@@ -59,7 +72,7 @@ const probes = [
     },
   },
   {
-    name: 'glmToolCall',
+    name: 'toolCall',
     note: '模型要求执行 run_command',
     body: {
       model,
@@ -81,7 +94,7 @@ const probes = [
     },
   },
   {
-    name: 'glmError',
+    name: 'error',
     note: '模型名不存在时厂商的报错',
     body: { model: '不存在的模型-xyz', messages: [{ role: 'user', content: 'hi' }] },
   },
@@ -122,7 +135,8 @@ const body = recorded
   .map(
     (item) =>
       `/** HTTP ${item.status} —— ${item.note} */\n` +
-      `export const ${item.name} = ${JSON.stringify(item.value, null, 2)};\n`,
+      `export const ${vendor}${item.name[0].toUpperCase()}${item.name.slice(1)} = ` +
+      `${JSON.stringify(item.value, null, 2)};\n`,
   )
   .join('\n');
 
