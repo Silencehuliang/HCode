@@ -1,6 +1,6 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,8 +11,10 @@ import { loadConfig, settingsPath } from './config.js';
  * (`~/.hcode/settings.json`)正是它要做的事之一,用假的读文件函数把它绕开,
  * 恰恰把最该验的那部分排除掉了。home 是参数,所以不需要碰真实的家目录。
  */
-function makeHome(settings?: unknown): string {
+function makeHome(t: TestContext, settings?: unknown): string {
   const home = mkdtempSync(join(tmpdir(), 'hcode-config-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+
   if (settings !== undefined) {
     mkdirSync(join(home, '.hcode'), { recursive: true });
     writeFileSync(
@@ -23,8 +25,8 @@ function makeHome(settings?: unknown): string {
   return home;
 }
 
-test('从用户级 settings.json 读出选中的 Provider', () => {
-  const home = makeHome({
+test('从用户级 settings.json 读出选中的 Provider', (t) => {
+  const home = makeHome(t, {
     provider: 'glm',
     providers: {
       glm: { apiKey: '密钥-1', model: 'glm-5.3', baseUrl: 'http://127.0.0.1:7863/v1' },
@@ -44,8 +46,8 @@ test('从用户级 settings.json 读出选中的 Provider', () => {
   });
 });
 
-test('环境变量覆盖配置文件 —— 文件先读,环境后读', () => {
-  const home = makeHome({
+test('环境变量覆盖配置文件 —— 文件先读,环境后读', (t) => {
+  const home = makeHome(t, {
     provider: 'glm',
     providers: { glm: { apiKey: '文件里的密钥', model: 'glm-5.3' } },
   });
@@ -70,8 +72,8 @@ test('环境变量覆盖配置文件 —— 文件先读,环境后读', () => {
   });
 });
 
-test('完全没有配置时,给出能照着做的首次运行引导', () => {
-  const home = makeHome();
+test('完全没有配置时,给出能照着做的首次运行引导', (t) => {
+  const home = makeHome(t);
 
   const outcome = loadConfig({ home, env: {} });
 
@@ -92,8 +94,8 @@ test('完全没有配置时,给出能照着做的首次运行引导', () => {
   );
 });
 
-test('settings.json 格式坏了时,指出是哪个文件和什么问题', () => {
-  const home = makeHome('{ 这不是 JSON');
+test('settings.json 格式坏了时,指出是哪个文件和什么问题', (t) => {
+  const home = makeHome(t, '{ 这不是 JSON');
 
   const outcome = loadConfig({ home, env: {} });
 
