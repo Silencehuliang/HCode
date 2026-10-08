@@ -1,8 +1,9 @@
 import { createInterface } from 'node:readline';
 
-import { runTurn, type LoopEvent } from '../core/loop.js';
+import { createSession } from '../core/session.js';
+import type { LoopEvent } from '../core/loop.js';
 import type { Tool } from '../core/tool.js';
-import type { Message, Provider } from '../provider/types.js';
+import type { Provider } from '../provider/types.js';
 
 export type ReplOptions = {
   provider: Provider;
@@ -30,89 +31,117 @@ function renderEvent(event: LoopEvent): void {
 /**
  * 极简交互界面。
  *
- * TUI 框架的选型已经被推迟(ADR-0006),这里刻意不引入任何框架。它只做四件事:
- * 读一行、把这一行交给主循环、把循环里发生的事显示出来、把控制权还回来。
+ * TUI 框架的选型已被推迟(ADR-0006),这里刻意不引入任何框架。它只做四件事:
+ * 读一行、把这一行递给会话、把会话里发生的事显示出来、把控制权还回来。
+ *
+ * 对话状态不在这里 —— 它归 createSession,连同"一次一轮"那个不变量。这里只剩
+ * 输入节奏:哪一行先、哪一行后,以及用户按 Ctrl+C 时该丢什么。
  *
  * 不给测试缝 —— 终端界面的快照测试极不稳定,维护成本高于收益(见规格的
- * Testing Decisions)。所以这里只放展示,不放判断。
+ * Testing Decisions)。所以这里只放展示与输入节奏,不放判断。
  */
 export async function startRepl(options: ReplOptions): Promise<void> {
+  const session = createSession({
+    provider: options.provider,
+    tools: options.tools,
+    system: options.system,
+    onEvent: renderEvent,
+  });
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
     prompt: '\n› ',
   });
 
-  let messages: Message[] = [];
-  let running: AbortController | null = null;
+  /** 还没轮到处理的输入行。 */
+  const pending: string[] = [];
+  let draining = false;
+  let inTurn = false;
+  let closing = false;
+
+  const say = (text: string): void => {
+    process.stdout.write(`${text}\n`);
+  };
+
+  async function handle(text: string): Promise<void> {
+    if (EXIT_COMMANDS.has(text)) {
+      closing = true;
+      rl.close();
+      return;
+    }
+    if (text === '') return;
+
+    try {
+      const result = await session.send(text);
+
+      if (result.text) say(`\n${result.text}`);
+      if (result.stoppedBecause === 'turn-limit') {
+        say('\n(已达这一轮的调用上限,先停在这里。接着说就行。)');
+      }
+      if (result.stoppedBecause === 'aborted') say('\n(已中断。接着说就行。)');
+    } catch (error) {
+      // 厂商的原始报错原样显示,不做友好化 —— "余额不足"和"参数不支持"
+      // 是两种不同的下一步,包成一句"出错了"就把这个区别抹掉了。
+      say(`\n出错了:${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * 一次只处理一行。
+   *
+   * 终端里粘贴一段多行文本时,readline 会把每一行几乎同时交出来。任它们各自
+   * 往下走,几轮就会同时在跑。会话本身也守住了这个不变量,但这里必须自己排一遍:
+   * 否则 Ctrl+C 掐掉的只是"当前那一轮",后面排着的几行会接着跑完 —— 而用户按下
+   * 它是想让它停下来。
+   */
+  async function drain(): Promise<void> {
+    if (draining) return;
+    draining = true;
+
+    try {
+      while (!closing && pending.length > 0) {
+        const text = pending.shift();
+        if (text === undefined) break;
+
+        inTurn = true;
+        try {
+          await handle(text);
+        } finally {
+          inTurn = false;
+        }
+      }
+    } finally {
+      draining = false;
+    }
+
+    if (!closing) rl.prompt();
+  }
+
+  rl.on('line', (line) => {
+    pending.push(line.trim());
+    void drain();
+  });
 
   // Ctrl+C 有两种含义,取决于此刻在做什么:
   //   空闲时 —— 退出。
-  //   命令跑着的时候 —— 掐掉它,但**不**退出会话。用户按下它是想让这件事停下来,
-  //   不是想丢掉整个对话。
+  //   有事在做时 —— 丢掉排队的、掐掉正在跑的,但**不**退出会话。用户按下它是想
+  //   让这件事停下来,不是想丢掉整个对话。
   process.on('SIGINT', () => {
-    if (running) {
-      process.stdout.write('\n(正在中断…)\n');
-      running.abort();
+    if (!inTurn && pending.length === 0) {
+      rl.close();
       return;
     }
-    rl.close();
+    pending.length = 0;
+    say('\n(正在中断…)');
+    session.abort();
   });
 
   await new Promise<void>((resolve) => {
     rl.on('close', resolve);
-
-    rl.on('line', (line) => {
-      void (async () => {
-        const text = line.trim();
-
-        if (EXIT_COMMANDS.has(text)) {
-          rl.close();
-          return;
-        }
-
-        if (text !== '') {
-          messages = [...messages, { role: 'user', text }];
-          running = new AbortController();
-
-          try {
-            const result = await runTurn(
-              {
-                provider: options.provider,
-                tools: options.tools,
-                system: options.system,
-                signal: running.signal,
-                onEvent: renderEvent,
-              },
-              messages,
-            );
-
-            // 交还的是完整对话,不是这一轮 —— 会话因此能一直继续下去。
-            messages = result.messages;
-
-            if (result.text) process.stdout.write(`\n${result.text}\n`);
-            if (result.stoppedBecause === 'turn-limit') {
-              process.stdout.write('\n(已达这一轮的调用上限,先停在这里。接着说就行。)\n');
-            }
-            if (result.stoppedBecause === 'aborted') {
-              process.stdout.write('\n(已中断。接着说就行。)\n');
-            }
-          } catch (error) {
-            // 厂商的原始报错原样显示,不做友好化 —— "余额不足"和"参数不支持"
-            // 是两种不同的下一步,包成一句"出错了"就把这个区别抹掉了。
-            process.stdout.write(`\n出错了:${(error as Error).message}\n`);
-          } finally {
-            running = null;
-          }
-        }
-
-        rl.prompt();
-      })();
-    });
-
     rl.prompt();
   });
 
-  // 退出时把提示行收干净,免得回车后终端停在半个 prompt 上。
+  // 退出时把提示行收干净,免得终端停在半个 prompt 上。
   process.stdout.write('\n');
 }
