@@ -1,0 +1,4 @@
+# 一次性产物,不进版本库
+.fixture-PROTOTYPE/
+results/
+.env

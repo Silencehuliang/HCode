@@ -1,0 +1,141 @@
+夹具已生成: E:\Development\Agents_Project\zcode_project\WorkStation\prototype\powershell-premise\.fixture-PROTOTYPE
+
+########## 环境: clean ##########
+跳过(环境缺程序): git-log(需 git)
+glm / minimal / read-manifest ... 4 cmds, first=ok
+glm / minimal / largest-files ... 2 cmds, first=ok
+glm / minimal / search-usage ... 2 cmds, first=ok
+glm / minimal / count-files ... 2 cmds, first=ok
+glm / minimal / run-tests ... 3 cmds, first=ok
+glm / minimal / install-deps ... 5 cmds, first=ok
+glm / minimal / create-file ... 1 cmds, first=ok
+glm / minimal / chinese-path ... 3 cmds, first=ok
+glm / minimal / process-check ... 1 cmds, first=ok
+glm / minimal / json-field ... 1 cmds, first=ok
+glm / minimal / cleanup ... 3 cmds, first=ok
+glm / minimal / env-var ... 1 cmds, first=ok
+glm / minimal / compare-files ... 3 cmds, first=ok
+glm / minimal / port-check ... 1 cmds, first=FAIL
+glm / mitigated / read-manifest ... 2 cmds, first=ok
+glm / mitigated / largest-files ... 2 cmds, first=ok
+glm / mitigated / search-usage ... 2 cmds, first=ok
+glm / mitigated / count-files ... 1 cmds, first=ok
+glm / mitigated / run-tests ... 4 cmds, first=ok
+glm / mitigated / install-deps ... 5 cmds, first=ok
+glm / mitigated / create-file ... 1 cmds, first=ok
+glm / mitigated / chinese-path ... 3 cmds, first=ok
+glm / mitigated / process-check ... 1 cmds, first=ok
+glm / mitigated / json-field ... 2 cmds, first=ok
+glm / mitigated / cleanup ... 6 cmds, first=ok
+glm / mitigated / env-var ... 1 cmds, first=ok
+glm / mitigated / compare-files ... 4 cmds, first=ok
+glm / mitigated / port-check ... 2 cmds, first=ok
+deepseek / minimal / read-manifest ... 7 cmds, first=ok
+deepseek / minimal / largest-files ... 2 cmds, first=ok
+deepseek / minimal / search-usage ... 4 cmds, first=ok
+deepseek / minimal / count-files ... 3 cmds, first=ok
+deepseek / minimal / run-tests ... 7 cmds, first=ok
+deepseek / minimal / install-deps ... 6 cmds, first=ok
+deepseek / minimal / create-file ... 1 cmds, first=ok
+deepseek / minimal / chinese-path ... 4 cmds, first=ok
+deepseek / minimal / process-check ... 2 cmds, first=ok
+deepseek / minimal / json-field ... 3 cmds, first=ok
+deepseek / minimal / cleanup ... 6 cmds, first=ok
+deepseek / minimal / env-var ... 3 cmds, first=ok [mojibake]
+deepseek / minimal / compare-files ... 2 cmds, first=ok
+deepseek / minimal / port-check ... 3 cmds, first=FAIL
+deepseek / mitigated / read-manifest ... 3 cmds, first=ok
+deepseek / mitigated / largest-files ... 2 cmds, first=ok
+deepseek / mitigated / search-usage ... 3 cmds, first=ok
+deepseek / mitigated / count-files ... 3 cmds, first=ok
+deepseek / mitigated / run-tests ... 8 cmds, first=ok
+deepseek / mitigated / install-deps ... 5 cmds, first=ok
+deepseek / mitigated / create-file ... 1 cmds, first=ok
+deepseek / mitigated / chinese-path ... 4 cmds, first=ok
+deepseek / mitigated / process-check ... 2 cmds, first=ok
+deepseek / mitigated / json-field ... 3 cmds, first=ok
+deepseek / mitigated / cleanup ... 6 cmds, first=ok
+deepseek / mitigated / env-var ... 2 cmds, first=ok
+deepseek / mitigated / compare-files ... 3 cmds, first=ok
+deepseek / mitigated / port-check ... 3 cmds, first=FAIL
+
+########## 环境: native ##########
+glm / minimal / read-manifest ... 3 cmds, first=ok
+glm / minimal / largest-files ... 1 cmds, first=ok
+glm / minimal / search-usage ... 2 cmds, first=ok
+glm / minimal / count-files ... 2 cmds, first=ok
+glm / minimal / run-tests ... 5 cmds, first=ok
+glm / minimal / install-deps ... 5 cmds, first=ok
+glm / minimal / git-log ... 2 cmds, first=ok
+glm / minimal / create-file ... 1 cmds, first=ok
+glm / minimal / chinese-path ... 3 cmds, first=ok
+glm / minimal / process-check ... 1 cmds, first=ok
+glm / minimal / json-field ... 1 cmds, first=ok
+glm / minimal / cleanup ... 6 cmds, first=ok
+glm / minimal / env-var ... 2 cmds, first=ok
+glm / minimal / compare-files ... 3 cmds, first=ok
+glm / minimal / port-check ... 2 cmds, first=FAIL
+glm / mitigated / read-manifest ... 2 cmds, first=ok
+glm / mitigated / largest-files ... 1 cmds, first=ok
+glm / mitigated / search-usage ... 4 cmds, first=ok
+glm / mitigated / count-files ... 1 cmds, first=ok
+glm / mitigated / run-tests ... 4 cmds, first=ok
+glm / mitigated / install-deps ... 3 cmds, first=ok
+glm / mitigated / git-log ... 9 cmds, first=ok
+glm / mitigated / create-file ... 1 cmds, first=ok
+glm / mitigated / chinese-path ... 4 cmds, first=ok
+glm / mitigated / process-check ... 1 cmds, first=ok
+glm / mitigated / json-field ... 1 cmds, first=ok
+glm / mitigated / cleanup ... 1 cmds, first=ok
+glm / mitigated / env-var ... 2 cmds, first=ok
+glm / mitigated / compare-files ... 2 cmds, first=ok
+glm / mitigated / port-check ... 1 cmds, first=ok
+deepseek / minimal / read-manifest ... 4 cmds, first=ok
+deepseek / minimal / largest-files ... 2 cmds, first=ok
+deepseek / minimal / search-usage ... 3 cmds, first=ok
+deepseek / minimal / count-files ... 2 cmds, first=ok
+deepseek / minimal / run-tests ... 8 cmds, first=ok
+deepseek / minimal / install-deps ... 5 cmds, first=ok
+deepseek / minimal / git-log ... 5 cmds, first=ok
+deepseek / minimal / create-file ... 1 cmds, first=ok
+deepseek / minimal / chinese-path ... 4 cmds, first=ok
+deepseek / minimal / process-check ... 1 cmds, first=ok
+deepseek / minimal / json-field ... 1 cmds, first=ok
+deepseek / minimal / cleanup ... 7 cmds, first=ok
+deepseek / minimal / env-var ... 3 cmds, first=ok
+deepseek / minimal / compare-files ... 4 cmds, first=ok
+deepseek / minimal / port-check ... 2 cmds, first=ok
+deepseek / mitigated / read-manifest ... 5 cmds, first=ok
+deepseek / mitigated / largest-files ... 3 cmds, first=ok
+deepseek / mitigated / search-usage ... 3 cmds, first=ok
+deepseek / mitigated / count-files ... 2 cmds, first=ok
+deepseek / mitigated / run-tests ... 4 cmds, first=ok
+deepseek / mitigated / install-deps ... 6 cmds, first=ok
+deepseek / mitigated / git-log ... 6 cmds, first=ok
+deepseek / mitigated / create-file ... 1 cmds, first=ok
+deepseek / mitigated / chinese-path ... 3 cmds, first=ok
+deepseek / mitigated / process-check ... 1 cmds, first=ok
+deepseek / mitigated / json-field ... 3 cmds, first=ok
+deepseek / mitigated / cleanup ... 4 cmds, first=ok
+deepseek / mitigated / env-var ... 3 cmds, first=ok
+deepseek / mitigated / compare-files ... 5 cmds, first=ok
+deepseek / mitigated / port-check ... 6 cmds, first=FAIL
+
+
+================ 结果 ================
+
+clean   glm/minimal            任务 14  首次成功  93%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+clean   glm/mitigated          任务 14  首次成功 100%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+clean   deepseek/minimal       任务 14  首次成功  93%  有硬失败   0%  有乱码   7%  试过 Unix 语法   0%
+clean   deepseek/mitigated     任务 14  首次成功  93%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+
+native  glm/minimal            任务 15  首次成功  93%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+native  glm/mitigated          任务 15  首次成功 100%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+native  deepseek/minimal       任务 15  首次成功 100%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+native  deepseek/mitigated     任务 15  首次成功  93%  有硬失败   0%  有乱码   0%  试过 Unix 语法   0%
+
+
+失败命令里的惯用法分布:
+   10  other
+
+明细: E:\Development\Agents_Project\zcode_project\WorkStation\prototype\powershell-premise\results\2026-10-08T10-48-19-235Z.json
