@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createSession } from './session.js';
+import { createToolset } from './toolset.js';
 import type { Provider, ProviderRequest, ProviderResponse } from '../provider/types.js';
 
 /**
@@ -29,7 +30,7 @@ function slowFirstProvider(order: string[]): Provider {
 test('连着说两句时,第二句看得到第一句的上下文', async () => {
   const session = createSession({
     provider: slowFirstProvider([]),
-    tools: [],
+    tools: createToolset([]),
     system: '你是一个编程助手。',
   });
 
@@ -46,7 +47,7 @@ test('同时说两句时依次执行 —— 对话是共享状态,两轮同时�
   const order: string[] = [];
   const session = createSession({
     provider: slowFirstProvider(order),
-    tools: [],
+    tools: createToolset([]),
     system: '你是一个编程助手。',
   });
 

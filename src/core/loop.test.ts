@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { runTurn } from './loop.js';
+import { createToolset } from './toolset.js';
+import { createTools } from '../tools/index.js';
 import type { Tool } from './tool.js';
 import type { Provider, ProviderRequest, ProviderResponse } from '../provider/types.js';
 
@@ -40,7 +42,7 @@ function fakeTool(name: string, run: (input: unknown) => Promise<string>): Tool 
 test('模型没有要求工具时,循环返回它的文本', async () => {
   const deps = {
     provider: fakeProvider({ text: '你好,我是 hcode。', toolCalls: [] }),
-    tools: [],
+    tools: createToolset([]),
     system: '你是一个编程助手。',
   };
 
@@ -62,7 +64,7 @@ test('模型要求工具时,循环执行它、把结果回喂,直到模型不再
   );
 
   const result = await runTurn(
-    { provider, tools: [echo], system: '你是一个编程助手。' },
+    { provider, tools: createToolset([echo]), system: '你是一个编程助手。' },
     [{ role: 'user', text: '跑一下 echo' }],
   );
 
@@ -85,7 +87,7 @@ test('循环交还更新后的对话,使调用方能继续这个会话', async (
   );
 
   const result = await runTurn(
-    { provider, tools: [echo], system: '你是一个编程助手。' },
+    { provider, tools: createToolset([echo]), system: '你是一个编程助手。' },
     [{ role: 'user', text: '跑一下 echo' }],
   );
 
@@ -111,7 +113,7 @@ test('模型反复要求工具时,循环在到达轮次上限后交还控制', a
   );
 
   const result = await runTurn(
-    { provider, tools: [forever], system: '你是一个编程助手。', maxTurns: 3 },
+    { provider, tools: createToolset([forever]), system: '你是一个编程助手。', maxTurns: 3 },
     [{ role: 'user', text: '一直做下去' }],
   );
 
@@ -134,7 +136,7 @@ test('工具执行前后各报一次,使界面能实时显示它在做什么', a
   await runTurn(
     {
       provider,
-      tools: [slow],
+      tools: createToolset([slow]),
       system: '你是一个编程助手。',
       onEvent: (event) => order.push(event.type),
     },
@@ -161,7 +163,7 @@ test('被中断时交还这一轮已经发生的对话,而不是把它丢掉', a
   );
 
   const result = await runTurn(
-    { provider, tools: [slow], system: '你是一个编程助手。', signal: controller.signal },
+    { provider, tools: createToolset([slow]), system: '你是一个编程助手。', signal: controller.signal },
     [{ role: 'user', text: '跑一下' }],
   );
 
@@ -171,5 +173,34 @@ test('被中断时交还这一轮已经发生的对话,而不是把它丢掉', a
     result.messages.length,
     3,
     '用户的话、模型的工具请求、工具的结果都要留着 —— 丢掉它们等于这一轮白跑,而用户中断往往只是想换个说法继续',
+  );
+});
+
+test('加一个工具 = 写一个 handler + 在注册表里加一行,主循环不必改动', async () => {
+  // 一个主循环从未听说过、也不可能有分支认识它的工具。
+  const 问日期 = fakeTool('today', async () => '2026-10-08');
+
+  const tools = createToolset([...createTools(), 问日期]);
+  const provider = fakeProvider(
+    { text: null, toolCalls: [{ id: 'call-1', name: 'today', input: {} }] },
+    { text: '今天是 2026-10-08。', toolCalls: [] },
+  );
+
+  const result = await runTurn({ provider, tools, system: '你是一个编程助手。' }, [
+    { role: 'user', text: '今天几号?' },
+  ]);
+
+  assert.equal(result.text, '今天是 2026-10-08。');
+  assert.ok(
+    provider.requests[0]?.tools.some((spec) => spec.name === 'today'),
+    '新工具要出现在交给模型的清单里 —— 注册一行就该被看见',
+  );
+  assert.ok(
+    result.messages.some(
+      (message) =>
+        message.role === 'tool' &&
+        message.results.some((resultItem) => resultItem.output === '2026-10-08'),
+    ),
+    '注册一行就该被执行,不需要在主循环里加任何东西',
   );
 });

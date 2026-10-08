@@ -1,5 +1,5 @@
 import type { Message, Provider } from '../provider/types.js';
-import type { Tool } from './tool.js';
+import type { Toolset } from './toolset.js';
 
 /**
  * 一轮对话最多调用模型的次数。到达后交还控制而不是继续 —— 上限存在的意义
@@ -20,7 +20,8 @@ export type LoopEvent =
 
 export type LoopDeps = {
   provider: Provider;
-  tools: Tool[];
+  /** 工具的分发结构。主循环不认识任何具体工具 —— 加工具不改这个文件。 */
+  tools: Toolset;
   system: string;
   maxTurns?: number;
   onEvent?: (event: LoopEvent) => void;
@@ -49,7 +50,6 @@ export async function runTurn(
   messages: Message[],
 ): Promise<TurnResult> {
   const conversation: Message[] = [...messages];
-  const toolSpecs = deps.tools.map((tool) => tool.spec);
   const maxTurns = deps.maxTurns ?? DEFAULT_MAX_TURNS;
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -62,7 +62,7 @@ export async function runTurn(
     const response = await deps.provider.send({
       system: deps.system,
       messages: conversation,
-      tools: toolSpecs,
+      tools: deps.tools.specs,
     });
 
     conversation.push({
@@ -79,13 +79,8 @@ export async function runTurn(
     // 那样交还给调用方的对话在下一次请求时是无效的。
     const results = [];
     for (const call of response.toolCalls) {
-      const tool = deps.tools.find((candidate) => candidate.spec.name === call.name);
-      if (!tool) throw new Error(`模型要求了不存在的工具:${call.name}`);
       deps.onEvent?.({ type: 'tool-call', name: call.name, input: call.input });
-      const output = await tool.run(
-        call.input,
-        deps.signal ? { signal: deps.signal } : undefined,
-      );
+      const output = await deps.tools.run(call, deps.signal ? { signal: deps.signal } : undefined);
       deps.onEvent?.({ type: 'tool-result', output });
       results.push({ id: call.id, output });
     }

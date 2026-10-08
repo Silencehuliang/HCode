@@ -2,7 +2,8 @@
 import { SYSTEM_PROMPT } from '../core/system-prompt.js';
 import { createGlmProvider } from '../provider/glm.js';
 import type { Provider } from '../provider/types.js';
-import { createRunCommandTool } from '../tools/run-command.js';
+import { createToolset } from '../core/toolset.js';
+import { createTools } from '../tools/index.js';
 import { startRepl } from '../tui/repl.js';
 import { loadConfig, type Session } from './config.js';
 
@@ -55,7 +56,7 @@ async function main(): Promise<number> {
 
   await startRepl({
     provider: createProvider(session),
-    tools: [createRunCommandTool()],
+    tools: createToolset(createTools()),
     system: SYSTEM_PROMPT,
   });
 

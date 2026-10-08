@@ -2,12 +2,12 @@ import { createInterface } from 'node:readline';
 
 import { createSession } from '../core/session.js';
 import type { LoopEvent } from '../core/loop.js';
-import type { Tool } from '../core/tool.js';
+import type { Toolset } from '../core/toolset.js';
 import type { Provider } from '../provider/types.js';
 
 export type ReplOptions = {
   provider: Provider;
-  tools: Tool[];
+  tools: Toolset;
   system: string;
 };
 

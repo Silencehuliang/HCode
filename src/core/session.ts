@@ -1,10 +1,10 @@
 import { runTurn, type LoopEvent, type TurnResult } from './loop.js';
 import type { Message, Provider } from '../provider/types.js';
-import type { Tool } from './tool.js';
+import type { Toolset } from './toolset.js';
 
 export type SessionDeps = {
   provider: Provider;
-  tools: Tool[];
+  tools: Toolset;
   system: string;
   maxTurns?: number;
   /** 每轮进行中发生的事,交给界面显示。 */
