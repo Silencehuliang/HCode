@@ -6,7 +6,9 @@ import { createExplorerTools, createTools } from '../tools/index.js';
 import { createTaskTool } from '../tools/task.js';
 import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
-import { loadConfig, type Session } from './config.js';
+import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
+import { createSkillTool } from '../tools/skill.js';
+import { loadConfig, skillRoots, type Session } from './config.js';
 
 /** 上下文预算的默认值。留出余量给模型这一轮的回答。 */
 const DEFAULT_CONTEXT_BUDGET = 96_000;
@@ -64,8 +66,14 @@ async function main(): Promise<number> {
   const todos = createTodoStore();
   const provider = createProvider(session);
 
+  // 格式写坏的 skill 要说出来。静默跳过的话,用户会一直以为它在生效。
+  const skills = await discoverSkills(skillRoots());
+  for (const problem of skills.problems()) {
+    process.stderr.write(`skill 读不出来 —— ${problem}\n`);
+  }
+
   // 子 agent 拿的是只读工具(createExplorerTools),不是主对话那一整套 ——
-  // 它被派出去的用途是帮我查清楚,不是帮我改掉。
+  // 它被派出去的用途是"帮我查清楚",不是"帮我改掉"。
   const task = createTaskTool({
     provider,
     tools: createExplorerTools(),
@@ -75,8 +83,8 @@ async function main(): Promise<number> {
 
   await startRepl({
     provider,
-    tools: [...createTools({ todos }), task],
-    system: SYSTEM_PROMPT,
+    tools: [...createTools({ todos }), task, createSkillTool(skills)],
+    system: [SYSTEM_PROMPT, renderSkillCatalog(skills.list())].filter(Boolean).join('\n\n'),
     budget: DEFAULT_CONTEXT_BUDGET,
   });
 

@@ -136,3 +136,22 @@ export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
     },
   };
 }
+
+/**
+ * skill 的搜索根目录,按优先级排列。
+ *
+ * 项目级排在用户级前面,`.claude` 排在 `.hcode` 后面 —— 两个顺序都是刻意的:
+ * 前者让项目里的 skill 能盖住全局那份,后者让 hcode 自己的目录压过兼容目录。
+ * 从别的工具迁过来的 skill 放在 `.claude/skills` 下就能直接用,不必改写。
+ */
+export function skillRoots(): string[] {
+  const home = homedir();
+  const cwd = process.cwd();
+
+  return [
+    join(cwd, '.hcode', 'skills'),
+    join(cwd, '.claude', 'skills'),
+    join(home, '.hcode', 'skills'),
+    join(home, '.claude', 'skills'),
+  ];
+}
