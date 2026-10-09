@@ -1,4 +1,4 @@
-import type { Tool } from '../core/tool.js';
+import type { Tool, ToolContext } from '../core/tool.js';
 import { parseModelBinding, type AgentCatalog, type AgentDef } from '../core/agents.js';
 import { runSubagent } from '../core/subagent.js';
 import { createToolset } from '../core/toolset.js';
@@ -30,7 +30,33 @@ export type TaskDeps = {
   agents?: AgentCatalog;
   /** 角色工具白名单的取材范围(主对话全量工具,含 todo 等)。 */
   allTools?: Tool[];
+  /**
+   * 并行派发的并发上限。默认 3 —— 刻意保守:Windows 每次 run_command 都要新起
+   * PowerShell 子进程,进程创建成本高于 POSIX;国产模型又按量计价,扇得太开
+   * 是一次账单教训(oMP 默认 32,那是另一套前提)。
+   */
+  maxConcurrent?: number;
 };
+
+const DEFAULT_MAX_CONCURRENT = 3;
+
+/** 并发上限下的保序 map:同时最多 limit 个在跑,返回顺序与输入一致。 */
+async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!, index);
+    }
+  };
+
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * 按角色定义解析出装配材料。
@@ -105,20 +131,131 @@ export function resolveAgentRun(
   };
 }
 
+export type TaskSpec = {
+  agent?: string;
+  description: string;
+  prompt: string;
+  context?: string;
+};
+
 /**
  * 把一次探查委派出去的工具。
  *
  * 不传 `agent` 时是旧行为:派只读探查者。传了则按注册表装配 —— 系统提示、
- * 工具集都来自角色文件(模型绑定归 v2-03,现在一律用主对话的 Provider)。
+ * 工具集都来自角色文件,模型绑定见 v2-03。传 `tasks` 数组则并行派多个,
+ * 结果按调用序回传。
  *
  * 它返回的是子 agent 最后那段话,**没有别的**。这是这个工具的全部意义:主对话
  * 只多出"派出去"和"结论"两条消息,子 agent 翻了八十个文件也好、一个也没找到也
- * 好,占的位置都一样。
+ * 好,占的位置都一样 —— 并行派多个也一样,回传的是**一条**合并结果,不是 N 条
+ * 消息(N 条会破坏压缩器"工具调用与结果成对"的假设)。
  */
 export function createTaskTool(deps: TaskDeps): Tool {
-  const agentHint = deps.agents
-    ? `可用角色:${deps.agents.list().map((agent) => `${agent.name}(${agent.description})`).join(';')}。`
+  const agents = deps.agents;
+  const agentHint = agents
+    ? `可用角色:${agents.list().map((agent) => `${agent.name}(${agent.description})`).join(';')}。`
     : '';
+
+  /** 派一个子 agent,带回它的结论。批量与单发共用这一条路径。 */
+  async function runOne(spec: TaskSpec, context: ToolContext | undefined): Promise<string> {
+    const label = spec.description;
+    const body = spec.prompt;
+
+    let system = deps.system;
+    let tools = deps.tools;
+    let restriction: AgentRestriction | undefined;
+    let provider = deps.provider;
+    // 统计行上的角色名:点名的用它,没点名就是缺省的探查者(内置 explorer)。
+    let statAgent = 'explorer';
+
+    if (spec.agent !== undefined && spec.agent.trim() !== '') {
+      const resolved = resolveAgentRun(deps, spec.agent.trim());
+      if ('error' in resolved) {
+        return resolved.error;
+      }
+      system = resolved.system;
+      tools = resolved.tools;
+      restriction = resolved.restriction;
+      provider = resolved.provider ?? deps.provider;
+      statAgent = resolved.def.name;
+    }
+
+    // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
+    // 背景与任务分开传,拼起来给它,让它一眼分清"环境"与"要做的事"。
+    const delegated =
+      spec.context !== undefined && spec.context.trim() !== ''
+        ? `背景:\n${spec.context.trim()}\n\n任务:\n${body}`
+        : body;
+
+    // 子 agent 的工具集必须过守门:角色可以继承主对话全量工具,不过这一层
+    // 它就是一台没有守门的 Remove-Item 机器。approve 从 ToolContext 递来的
+    // 是终端的确认通道;没有它(比如单测里)就一路 ask 下去,不会误放行。
+    const guarded = guardToolsetForAgent(createToolset(tools), {
+      approve: context?.approve ?? (async () => false),
+      ...(restriction !== undefined ? { restriction } : {}),
+    });
+
+    const startedAt = Date.now();
+    try {
+      const result = await runSubagent(
+        {
+          provider,
+          tools: guarded,
+          system,
+          ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+        },
+        delegated,
+        context?.signal,
+      );
+
+      // 成本回显:多角色最大的隐性代价是 token,先让用户看见。没有 emit 通道
+      // (单测、非交互调用)就只是不报 —— 派发本身不受影响。
+      context?.emit?.({
+        type: 'subagent-done',
+        agent: statAgent,
+        model: provider.model,
+        tokens: result.tokens,
+        durationMs: Date.now() - startedAt,
+      });
+
+      return result.text;
+    } catch (error) {
+      // 子任务失败必须回到主对话。否则模型只知道"没有结论",无从判断该重派、
+      // 该换个提示,还是该自己来做 —— 它会原地重派一次,然后第二次也失败。
+      return `子任务「${label}」失败了,没有拿到结论。错误原文:${(error as Error).message}`;
+    }
+  }
+
+  /** 一次扇出多个。结果按**调用序**回传,并合成一条文本 —— 主对话只多一条结果。 */
+  async function runBatch(items: unknown[], context: ToolContext | undefined): Promise<string> {
+    if (items.length === 0) {
+      return 'tasks 是空的,没有可派发的子任务。';
+    }
+
+    const specs: TaskSpec[] = [];
+    for (const [index, raw] of items.entries()) {
+      const entry = (raw ?? {}) as Record<string, unknown>;
+      try {
+        specs.push({
+          ...(typeof entry.agent === 'string' ? { agent: entry.agent } : {}),
+          description: asText(entry.description, `tasks[${index}].description`),
+          prompt: asText(entry.prompt, `tasks[${index}].prompt`),
+          ...(typeof entry.context === 'string' ? { context: entry.context } : {}),
+        });
+      } catch (error) {
+        // 一条坏项不该毁掉整批:明确指出第几项坏了,让模型改对再来。
+        return `批量派发没发起:${(error as Error).message}`;
+      }
+    }
+
+    const limit = deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+    const results = await mapWithLimit(specs, limit, (spec) => runOne(spec, context));
+
+    return [
+      `派发 ${specs.length} 个角色(并发上限 ${limit}),按调用序回传:`,
+      ...specs.map((spec, index) => `\n【${index + 1}】${spec.agent ?? 'explorer'} — ${spec.description}\n${results[index]}`),
+    ].join('');
+  }
 
   return {
     spec: {
@@ -129,6 +266,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
         '比如"这个功能在哪些地方被用到"、"这个报错是从哪冒出来的"。',
         '什么时候别用:你知道确切位置(直接 read_file)、你本来就需要那些原文(那把它读进主对话才对)。',
         '子 agent 看不到这段对话,你交代的上下文是它唯一的信息来源。',
+        '一次要查几件互不相干的事时,用 tasks 数组一次派出去(会并行跑,结果按顺序回)。',
         ...(agentHint ? [agentHint] : []),
       ].join(''),
       inputSchema: {
@@ -148,79 +286,44 @@ export function createTaskTool(deps: TaskDeps): Tool {
             description:
               '子 agent 需要的背景(它在哪个仓库干活、相关约定、已经知道的事实)。子 agent 冷启动,这段背景写薄了它会乱翻。',
           },
+          tasks: {
+            type: 'array',
+            description:
+              '一次派多个角色时用这个,别用单数那几个字段。互相独立、能同时查的才放进来;有先后依赖的仍要走单数形态。',
+            items: {
+              type: 'object',
+              properties: {
+                agent: { type: 'string', description: '派哪个角色(按名),不传则派缺省探查者' },
+                description: { type: 'string', description: '三五个字说明这一项做什么' },
+                prompt: { type: 'string', description: '这一项交给子 agent 的完整交代' },
+                context: { type: 'string', description: '这一项需要的背景' },
+              },
+              required: ['description', 'prompt'],
+            },
+          },
         },
-        required: ['description', 'prompt'],
+        required: [],
       },
     },
 
     async run(input, context) {
-      const { agent, description, prompt, context: background } = (input ?? {}) as Record<string, unknown>;
-      const label = asText(description, 'description');
-      const body = asText(prompt, 'prompt');
+      const raw = (input ?? {}) as Record<string, unknown>;
 
-      let system = deps.system;
-      let tools = deps.tools;
-      let restriction: AgentRestriction | undefined;
-      let provider = deps.provider;
-      // 统计行上的角色名:点名的用它,没点名就是缺省的探查者(内置 explorer)。
-      let statAgent = 'explorer';
-
-      if (typeof agent === 'string' && agent.trim() !== '') {
-        const resolved = resolveAgentRun(deps, agent.trim());
-        if ('error' in resolved) {
-          return resolved.error;
-        }
-        system = resolved.system;
-        tools = resolved.tools;
-        restriction = resolved.restriction;
-        provider = resolved.provider ?? deps.provider;
-        statAgent = resolved.def.name;
+      // 批量形态优先:给了 tasks 就一次扇出去。单数那几个字段这时不读 ——
+      // 两套形态混着用,行为没有唯一解释,不如让 tasks 完全接管。
+      if (Array.isArray(raw.tasks)) {
+        return runBatch(raw.tasks, context);
       }
 
-      // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
-      // 背景与任务分开传,拼起来给它,让它一眼分清"环境"与"要做的事"。
-      const delegated =
-        typeof background === 'string' && background.trim() !== ''
-          ? `背景:\n${background.trim()}\n\n任务:\n${body}`
-          : body;
-
-      // 子 agent 的工具集必须过守门:角色可以继承主对话全量工具,不过这一层
-      // 它就是一台没有守门的 Remove-Item 机器。approve 从 ToolContext 递来的
-      // 是终端的确认通道;没有它(比如单测里)就一路 ask 下去,不会误放行。
-      const guarded = guardToolsetForAgent(createToolset(tools), {
-        approve: context?.approve ?? (async () => false),
-        ...(restriction !== undefined ? { restriction } : {}),
-      });
-
-      const startedAt = Date.now();
-      try {
-        const result = await runSubagent(
-          {
-            provider,
-            tools: guarded,
-            system,
-            ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
-          },
-          delegated,
-          context?.signal,
-        );
-
-        // 成本回显:多角色最大的隐性代价是 token,先让用户看见。没有 emit 通道
-        // (单测、非交互调用)就只是不报 —— 派发本身不受影响。
-        context?.emit?.({
-          type: 'subagent-done',
-          agent: statAgent,
-          model: provider.model,
-          tokens: result.tokens,
-          durationMs: Date.now() - startedAt,
-        });
-
-        return result.text;
-      } catch (error) {
-        // 子任务失败必须回到主对话。否则模型只知道"没有结论",无从判断该重派、
-        // 该换个提示,还是该自己来做 —— 它会原地重派一次,然后第二次也失败。
-        return `子任务「${label}」失败了,没有拿到结论。错误原文:${(error as Error).message}`;
-      }
+      return runOne(
+        {
+          ...(typeof raw.agent === 'string' ? { agent: raw.agent } : {}),
+          description: asText(raw.description, 'description'),
+          prompt: asText(raw.prompt, 'prompt'),
+          ...(typeof raw.context === 'string' ? { context: raw.context } : {}),
+        },
+        context,
+      );
     },
   };
 }

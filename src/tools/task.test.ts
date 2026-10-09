@@ -583,3 +583,252 @@ test('没有 emit 通道时不报错,派发照常', async () => {
   const output = await task.run({ description: 'd', prompt: 'p' });
   assert.equal(output, '结论');
 });
+
+// ---------- v2-07:并行派发 ----------
+
+/** 一个可以控制"跑多久"的假 Provider:prompt 里带 sleep 毫秒数。 */
+function slowScripted(delays: Map<string, number>): { provider: Provider; order: string[] } {
+  const order: string[] = [];
+  return {
+    order,
+    provider: {
+      id: 'slow',
+      model: 'slow-model',
+      async send(request) {
+        const text = (request.messages[0] as { text?: string } | undefined)?.text ?? '';
+        const delay = delays.get(text.slice(-8)) ?? 0;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        order.push(text.slice(-8));
+        return { text: `结论:${text.slice(-8)}`, toolCalls: [] };
+      },
+    },
+  };
+}
+
+test('并行派发:结果按调用序回传,即使完成顺序相反', async () => {
+  // A 慢 B 快 —— 完成顺序是 B、A,但回传必须是 A、B(调用序)。
+  const delays = new Map([
+    ['TASK-AAA', 60],
+    ['TASK-BBB', 5],
+  ]);
+  const sub = slowScripted(delays);
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x', maxConcurrent: 2 });
+
+  const output = (await task.run({
+    tasks: [
+      { description: '慢的', prompt: '做 TASK-AAA' },
+      { description: '快的', prompt: '做 TASK-BBB' },
+    ],
+  })) as string;
+
+  const posA = output.indexOf('TASK-AAA');
+  const posB = output.indexOf('TASK-BBB');
+  assert.ok(posA >= 0 && posB >= 0);
+  assert.ok(posA < posB, `回传要按调用序(A 在 B 前)。实际:\n${output}`);
+});
+
+test('并发上限生效:limit=1 时严格串行', async () => {
+  let active = 0;
+  let peak = 0;
+  const order: string[] = [];
+
+  const provider: Provider = {
+    id: 'p',
+    model: 'm',
+    async send(request) {
+      active += 1;
+      peak = Math.max(peak, active);
+      const text = (request.messages[0] as { text?: string } | undefined)?.text ?? '';
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      order.push(text.slice(-8));
+      active -= 1;
+      return { text: 'ok', toolCalls: [] };
+    },
+  };
+
+  const task = createTaskTool({ provider, tools: [], system: 'x', maxConcurrent: 1 });
+
+  await task.run({
+    tasks: [
+      { description: 'a', prompt: 'X-AA' },
+      { description: 'b', prompt: 'X-BB' },
+      { description: 'c', prompt: 'X-CC' },
+    ],
+  });
+
+  assert.equal(peak, 1, '限 1 就该一个跑完再跑下一个');
+  assert.deepEqual(order, ['1X-AA', '2X-BB', '3X-CC'].map((s) => s.slice(-4)), '串行时顺序即调用序');
+});
+
+test('并发上限:limit=2 时第 3 个等前两个中的一个完成', async () => {
+  let active = 0;
+  let peak = 0;
+
+  const provider: Provider = {
+    id: 'p',
+    model: 'm',
+    async send() {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return { text: 'ok', toolCalls: [] };
+    },
+  };
+
+  const task = createTaskTool({ provider, tools: [], system: 'x', maxConcurrent: 2 });
+
+  await task.run({
+    tasks: [
+      { description: 'a', prompt: 'A' },
+      { description: 'b', prompt: 'B' },
+      { description: 'c', prompt: 'C' },
+    ],
+  });
+
+  assert.ok(peak <= 2, `同时最多 2 个。实际峰值 ${peak}`);
+  assert.ok(peak >= 2, `三个任务限 2,峰值应该真到 2。实际 ${peak}`);
+});
+
+test('每个子 agent 各自报一次成本', async () => {
+  const sub = scripted(
+    { text: '结论一', toolCalls: [] },
+    { text: '结论二', toolCalls: [] },
+    { text: '结论三', toolCalls: [] },
+  );
+  const events: SubagentDoneEvent[] = [];
+
+  const agents = makeCatalog(
+    agentDef({ name: 'a' }),
+    agentDef({ name: 'b' }),
+    agentDef({ name: 'c' }),
+  );
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  await task.run(
+    {
+      tasks: [
+        { agent: 'a', description: '一', prompt: 'p1' },
+        { agent: 'b', description: '二', prompt: 'p2' },
+        { agent: 'c', description: '三', prompt: 'p3' },
+      ],
+    },
+    { emit: (event) => events.push(event) } as ToolContext,
+  );
+
+  assert.equal(events.length, 3, '三个派发三次统计');
+  assert.deepEqual(events.map((e) => e.agent).sort(), ['a', 'b', 'c']);
+});
+
+test('批量里的一项坏掉 → 整批不发起,并指出第几项', async () => {
+  const sub = scripted();
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x' });
+
+  const output = (await task.run({
+    tasks: [
+      { description: 'ok', prompt: 'p' },
+      { description: '', prompt: 'p2' }, // 坏项
+    ],
+  })) as string;
+
+  assert.match(output, /没发起|tasks\[1\]/);
+  assert.equal(sub.requests.length, 0, '坏批不该发出一半');
+});
+
+test('并行派发的工具结果是一条消息,压缩器的配对假设不被破坏', async () => {
+  const sub = scripted(
+    { text: '结论 A', toolCalls: [] },
+    { text: '结论 B', toolCalls: [] },
+  );
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x', maxConcurrent: 2 });
+
+  const main = scripted(
+    {
+      text: null,
+      toolCalls: [
+        {
+          id: 'c1',
+          name: 'task',
+          input: { tasks: [{ description: 'a', prompt: 'pa' }, { description: 'b', prompt: 'pb' }] },
+        },
+      ],
+    },
+    { text: '好', toolCalls: [] },
+  );
+
+  const result = await runTurn(
+    { provider: main.provider, tools: createToolset([task]), system: '主提示' },
+    [{ role: 'user', text: '开始' }],
+  );
+
+  // 不变量:每个 assistant 消息里的 toolCalls 都能在紧接着的 tool 消息里找到 id。
+  const messages = result.messages;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant' || !message.toolCalls) continue;
+    const next = messages[i + 1];
+    assert.ok(next && next.role === 'tool', `第 ${i} 条 assistant 的 toolCalls 后面必须紧跟 tool 结果`);
+    if (next.role !== 'tool') continue;
+    assert.deepEqual(
+      next.results.map((r) => r.id).sort(),
+      message.toolCalls.map((c) => c.id).sort(),
+      '工具调用与结果必须成对 —— 压缩器的整个前提就建立在这一点上',
+    );
+  }
+});
+
+test('并行派发的结果进压缩器后,工具调用与结果仍然成对(夹具)', async () => {
+  const { compact } = await import('../core/compact.js');
+  const { estimateMessageTokens } = await import('../core/tokens.js');
+
+  const sub = scripted({ text: '结论 A', toolCalls: [] }, { text: '结论 B', toolCalls: [] });
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x', maxConcurrent: 2 });
+
+  const main = scripted(
+    {
+      text: null,
+      toolCalls: [
+        {
+          id: 'c1',
+          name: 'task',
+          input: { tasks: [{ description: 'a', prompt: 'pa' }, { description: 'b', prompt: 'pb' }] },
+        },
+      ],
+    },
+    { text: '好', toolCalls: [] },
+  );
+
+  const turn = await runTurn(
+    { provider: main.provider, tools: createToolset([task]), system: '主提示' },
+    [{ role: 'user', text: '开始' }],
+  );
+
+  for (const did of ['none', 'trimmed', 'summarized'] as const) {
+    // 三种预算:从装得下、到只能裁、到必须摘要 —— 三条路径都走一遍。
+    const budget = did === 'none' ? 1_000_000 : did === 'trimmed' ? 60 : 1;
+    const result = await compact(turn.messages, {
+      estimate: estimateMessageTokens,
+      budget,
+      summarize: async () => '摘要',
+      floor: 1,
+      keepRecentMessages: 2,
+    });
+
+    const messages = result.messages;
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i]!;
+      if (message.role !== 'assistant' || !message.toolCalls) continue;
+      const next = messages[i + 1];
+      assert.ok(next && next.role === 'tool', `[${did}] 压缩后第 ${i} 条 assistant 的 toolCalls 失去配对`);
+      if (!next || next.role !== 'tool') continue;
+      assert.deepEqual(
+        next.results.map((r) => r.id).sort(),
+        message.toolCalls.map((c) => c.id).sort(),
+        `[${did}] 压缩后工具调用与结果必须成对`,
+      );
+    }
+  }
+});
