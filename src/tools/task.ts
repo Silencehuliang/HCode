@@ -162,6 +162,8 @@ export function createTaskTool(deps: TaskDeps): Tool {
       let tools = deps.tools;
       let restriction: AgentRestriction | undefined;
       let provider = deps.provider;
+      // 统计行上的角色名:点名的用它,没点名就是缺省的探查者(内置 explorer)。
+      let statAgent = 'explorer';
 
       if (typeof agent === 'string' && agent.trim() !== '') {
         const resolved = resolveAgentRun(deps, agent.trim());
@@ -172,6 +174,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
         tools = resolved.tools;
         restriction = resolved.restriction;
         provider = resolved.provider ?? deps.provider;
+        statAgent = resolved.def.name;
       }
 
       // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
@@ -189,8 +192,9 @@ export function createTaskTool(deps: TaskDeps): Tool {
         ...(restriction !== undefined ? { restriction } : {}),
       });
 
+      const startedAt = Date.now();
       try {
-        return await runSubagent(
+        const result = await runSubagent(
           {
             provider,
             tools: guarded,
@@ -200,6 +204,18 @@ export function createTaskTool(deps: TaskDeps): Tool {
           delegated,
           context?.signal,
         );
+
+        // 成本回显:多角色最大的隐性代价是 token,先让用户看见。没有 emit 通道
+        // (单测、非交互调用)就只是不报 —— 派发本身不受影响。
+        context?.emit?.({
+          type: 'subagent-done',
+          agent: statAgent,
+          model: provider.model,
+          tokens: result.tokens,
+          durationMs: Date.now() - startedAt,
+        });
+
+        return result.text;
       } catch (error) {
         // 子任务失败必须回到主对话。否则模型只知道"没有结论",无从判断该重派、
         // 该换个提示,还是该自己来做 —— 它会原地重派一次,然后第二次也失败。

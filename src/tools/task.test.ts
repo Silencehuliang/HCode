@@ -5,7 +5,7 @@ import { runTurn } from '../core/loop.js';
 import { estimateMessageTokens } from '../core/tokens.js';
 import { createToolset } from '../core/toolset.js';
 import { createTaskTool, resolveAgentRun } from './task.js';
-import type { ToolContext } from '../core/tool.js';
+import type { SubagentDoneEvent, ToolContext } from '../core/tool.js';
 import type { AgentCatalog, AgentDef } from '../core/agents.js';
 import type { Tool } from '../core/tool.js';
 import type { Message, Provider, ProviderRequest, ProviderResponse } from '../provider/types.js';
@@ -526,4 +526,60 @@ test('不写 model → 与主对话同 Provider(缺省继承)', async () => {
   const output = (await task.run({ agent: 'plain', description: 'd', prompt: 'p' })) as string;
   assert.equal(output, '继承结论');
   assert.equal(factoryCalled, 0, '没有 model 字段就不该去查工厂');
+});
+
+// ---------- v2-06:派发成本可见 ----------
+
+test('派发结束回报统计:角色名、模型、token 估算、耗时', async () => {
+  const sub = scripted({ text: '结论文本', toolCalls: [] });
+  const events: SubagentDoneEvent[] = [];
+
+  const agents = makeCatalog(agentDef({ name: 'reviewer', model: 'deepseek' }));
+  const task = createTaskTool({
+    provider: sub.provider,
+    providerFor: () => sub.provider,
+    tools: [],
+    system: 'x',
+    agents,
+  });
+
+  await task.run(
+    { agent: 'reviewer', description: 'd', prompt: '看这段' },
+    { emit: (event) => events.push(event) } as ToolContext,
+  );
+
+  assert.equal(events.length, 1);
+  const event = events[0]!;
+  assert.equal(event.type, 'subagent-done');
+  assert.equal(event.agent, 'reviewer');
+  assert.equal(event.model, sub.provider.model);
+  assert.ok(event.durationMs >= 0);
+  // 统计的是**子 agent 会话**的估算,不是主对话的 —— 这正是成本可见的含义。
+  const expected = estimateMessageTokens([
+    { role: 'user', text: '看这段' },
+    { role: 'assistant', text: '结论文本' },
+  ]);
+  assert.equal(event.tokens, expected, 'token 估算要与子 agent 的会话一致');
+});
+
+test('不指定 agent 时统计行用 explorer(内置探查者)的名字', async () => {
+  const sub = scripted({ text: '结论', toolCalls: [] });
+  const events: SubagentDoneEvent[] = [];
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x' });
+  await task.run(
+    { description: 'd', prompt: 'p' },
+    { emit: (event) => events.push(event) } as ToolContext,
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.agent, 'explorer');
+});
+
+test('没有 emit 通道时不报错,派发照常', async () => {
+  const sub = scripted({ text: '结论', toolCalls: [] });
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x' });
+
+  const output = await task.run({ description: 'd', prompt: 'p' });
+  assert.equal(output, '结论');
 });

@@ -30,10 +30,17 @@ function renderToolCall(name: string, input: unknown): string {
 function renderEvent(event: LoopEvent): void {
   if (event.type === 'tool-call') {
     process.stdout.write(`${renderToolCall(event.name, event.input)}\n`);
-  } else {
-    // 工具结果是给模型看的原文,原样显示 —— 用户要看到的就是 stdout 与 stderr。
-    process.stdout.write(`${event.output}\n`);
+    return;
   }
+  if (event.type === 'subagent-done') {
+    // 多角色最大的隐性代价是 token 成本 —— 一行说清这次派发花了什么。
+    const tokens = event.tokens >= 1000 ? `${(event.tokens / 1000).toFixed(1)}k` : `${event.tokens}`;
+    const seconds = (event.durationMs / 1000).toFixed(1);
+    process.stdout.write(`\n⏺ [${event.agent} · ${event.model} · ~${tokens} token · ${seconds}s]\n`);
+    return;
+  }
+  // 工具结果是给模型看的原文,原样显示 —— 用户要看到的就是 stdout 与 stderr。
+  process.stdout.write(`${event.output}\n`);
 }
 
 /** 问用户的话。要说清"要动什么",否则他没法判断。 */

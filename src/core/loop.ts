@@ -16,7 +16,9 @@ export const DEFAULT_MAX_TURNS = 25;
  */
 export type LoopEvent =
   | { type: 'tool-call'; name: string; input: unknown }
-  | { type: 'tool-result'; output: string };
+  | { type: 'tool-result'; output: string }
+  /** 子 agent 派发结束(由 task 工具经 ToolContext.emit 报上来)。 */
+  | { type: 'subagent-done'; agent: string; model: string; tokens: number; durationMs: number };
 
 export type LoopDeps = {
   provider: Provider;
@@ -84,7 +86,13 @@ export async function runTurn(
     const results = [];
     for (const call of response.toolCalls) {
       deps.onEvent?.({ type: 'tool-call', name: call.name, input: call.input });
-      const output = await deps.tools.run(call, deps.signal ? { signal: deps.signal } : undefined);
+      // context 里带上界面通道:signal 给它掐进程,emit 让内部发生的
+      // 事(如 task 派发结束)能回报给界面。
+      const context = {
+        ...(deps.signal ? { signal: deps.signal } : {}),
+        ...(deps.onEvent ? { emit: deps.onEvent } : {}),
+      };
+      const output = await deps.tools.run(call, Object.keys(context).length > 0 ? context : undefined);
       deps.onEvent?.({ type: 'tool-result', output });
       results.push({ id: call.id, output });
     }

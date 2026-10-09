@@ -1,6 +1,19 @@
 import { runTurn } from './loop.js';
+import { estimateMessageTokens } from './tokens.js';
 import type { Provider } from '../provider/types.js';
 import type { Toolset } from './toolset.js';
+
+/**
+ * 一次子任务的结果。
+ *
+ * 带上 tokens 是因为多角色协作最大的隐性代价就是它:只给结论、不给花了多少,
+ * 用户没法判断"侦察用便宜模型"这类策略到底省没省。它不是账单,是估算 ——
+ * 见 tokens.ts 的说明。
+ */
+export type SubagentResult = {
+  text: string;
+  tokens: number;
+};
 
 export type SubagentDeps = {
   provider: Provider;
@@ -31,12 +44,14 @@ export async function runSubagent(
   deps: SubagentDeps,
   prompt: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<SubagentResult> {
   const result = await runTurn(
     { ...deps, ...(signal ? { signal } : {}) },
     [{ role: 'user', text: prompt }],
   );
 
-  if (result.text === null) return TURN_LIMIT_NOTE;
-  return result.text;
+  return {
+    text: result.text === null ? TURN_LIMIT_NOTE : result.text,
+    tokens: estimateMessageTokens(result.messages),
+  };
 }
