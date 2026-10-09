@@ -832,3 +832,176 @@ test('并行派发的结果进压缩器后,工具调用与结果仍然成对(夹
     }
   }
 });
+
+
+
+// ---------- v2-09:受限递归派发 ----------
+
+type Seen = { prompt: string; toolNames: string[]; transcript: string };
+
+/**
+ * 递归探针:每段对话**只在自己第一轮**里按 prompt 决定派不派下一层。
+ * 只用 messages[0] 判断会让同一个工具调用无限重发(跑到轮次上限才停),
+ * 所以必须把"第一次"这件事算进去。
+ */
+function recursiveProbe(): { provider: Provider; seen: Seen[] } {
+  const seen: Seen[] = [];
+  return {
+    seen,
+    provider: {
+      id: 'rec',
+      model: 'rec-model',
+      async send(request) {
+        const prompt = (request.messages[0] as { text?: string } | undefined)?.text ?? '';
+        const first = request.messages.length === 1;
+        const transcript = request.messages
+          .map((m) => (m.role === 'tool' ? m.results.map((r) => r.output).join('') : m.role === 'assistant' ? m.text ?? '' : m.text))
+          .join('\n');
+        seen.push({ prompt, toolNames: request.tools.map((t) => t.name), transcript });
+
+        if (first && /派下去/.test(prompt)) {
+          const next = prompt.includes('-A') ? '派下去-B' : '叶子';
+          return {
+            text: null,
+            toolCalls: [{ id: `c${seen.length}`, name: 'task', input: { agent: 'explorer', description: 'd', prompt: next } }],
+          };
+        }
+        return { text: '叶子结论', toolCalls: [] };
+      },
+    },
+  };
+}
+
+test('spawns 声明的角色能派子 agent;未声明的拿不到 task 工具', async () => {
+  const rec = recursiveProbe();
+  const agents = makeCatalog(
+    agentDef({ name: 'lead', spawns: ['explorer'] }),
+    agentDef({ name: 'explorer' }),
+    agentDef({ name: 'loner' }),
+  );
+
+  const task = createTaskTool({ provider: rec.provider, tools: [], system: 'x', agents });
+
+  await task.run({ agent: 'lead', description: 'd', prompt: '直接答' });
+  assert.ok(rec.seen[0]!.toolNames.includes('task'), 'lead 声明了 spawns,该拿到 task');
+
+  await task.run({ agent: 'loner', description: 'd', prompt: '直接答' });
+  assert.ok(!rec.seen.at(-1)!.toolNames.includes('task'), 'loner 没写 spawns,不该拿到 task');
+});
+
+test('默认深度 2:三层递归,到顶那层没有 task', async () => {
+  const rec = recursiveProbe();
+  const agents = makeCatalog(
+    agentDef({ name: 'lead', spawns: ['explorer'] }),
+    agentDef({ name: 'explorer', spawns: ['explorer'] }),
+  );
+
+  const task = createTaskTool({ provider: rec.provider, tools: [], system: 'x', agents });
+  const output = (await task.run({ agent: 'lead', description: 'd', prompt: '派下去-A' })) as string;
+
+  // 第一层(lead,深度 0)与第二层(explorer,深度 1)都该有 task;第三层到顶没有。
+  const lead = rec.seen.find((e) => e.prompt === '派下去-A')!;
+  const middle = rec.seen.find((e) => e.prompt === '派下去-B')!;
+  const leaf = rec.seen.find((e) => e.prompt === '叶子')!;
+
+  assert.ok(lead.toolNames.includes('task'), '深度 0 该能派');
+  assert.ok(middle.toolNames.includes('task'), '深度 1 且声明了 spawns,该能派');
+  assert.ok(!leaf.toolNames.includes('task'), '深度到顶(2),不该再有 task 工具');
+  assert.match(output, /叶子结论/, '结论要一路上带回来');
+});
+
+test('maxDepth=0:第一层就没有 task(上限优先于声明)', async () => {
+  const rec = recursiveProbe();
+  const agents = makeCatalog(
+    agentDef({ name: 'lead', spawns: ['explorer'] }),
+    agentDef({ name: 'explorer', spawns: ['explorer'] }),
+  );
+
+  const task = createTaskTool({ provider: rec.provider, tools: [], system: 'x', agents, maxDepth: 0 });
+  await task.run({ agent: 'lead', description: 'd', prompt: '直接答' });
+
+  assert.ok(!rec.seen[0]!.toolNames.includes('task'), 'maxDepth=0 时声明了 spawns 也没有 task');
+});
+
+test('递归子 agent 只看得见白名单里的角色,派白名单外会被拒', async () => {
+  const seen: Seen[] = [];
+  const provider: Provider = {
+    id: 'rec',
+    model: 'rec-model',
+    async send(request) {
+      const prompt = (request.messages[0] as { text?: string } | undefined)?.text ?? '';
+      const transcript = request.messages
+        .map((m) =>
+          m.role === 'tool'
+            ? m.results.map((r) => r.output).join('')
+            : m.role === 'assistant'
+              ? m.text ?? ''
+              : m.text,
+        )
+        .join('\n');
+      seen.push({ prompt, toolNames: request.tools.map((t) => t.name), transcript });
+
+      // lead 第一轮就试着派 "other"(不在它的 spawns 白名单里)。
+      if (request.messages.length === 1) {
+        return {
+          text: null,
+          toolCalls: [{ id: 'c1', name: 'task', input: { agent: 'other', description: 'd', prompt: 'p' } }],
+        };
+      }
+      return { text: '收工', toolCalls: [] };
+    },
+  };
+
+  const agents = makeCatalog(
+    agentDef({ name: 'lead', spawns: ['explorer'] }),
+    agentDef({ name: 'explorer' }),
+    agentDef({ name: 'other' }),
+  );
+
+  const task = createTaskTool({ provider, tools: [], system: 'x', agents });
+  await task.run({ agent: 'lead', description: 'd', prompt: '开始' });
+
+  // 第二次 send 的转写里应当带着那条拒绝 —— 而且只列 explorer。
+  const second = seen[1]!;
+  assert.match(second.transcript, /没有名为 other 的角色/, `实际:${second.transcript}`);
+  assert.match(second.transcript, /explorer/);
+});
+
+test('再派一层的成本也会浮上来(孙子的花费不吞掉)', async () => {
+  const seen: string[] = [];
+  const provider: Provider = {
+    id: 'rec',
+    model: 'rec-model',
+    async send(request) {
+      const prompt = (request.messages[0] as { text?: string } | undefined)?.text ?? '';
+      seen.push(prompt);
+      if (request.messages.length === 1 && /派下去/.test(prompt)) {
+        return {
+          text: null,
+          toolCalls: [
+            { id: `c${seen.length}`, name: 'task', input: { agent: 'explorer', description: 'd', prompt: '叶子' } },
+          ],
+        };
+      }
+      return { text: '结论', toolCalls: [] };
+    },
+  };
+
+  const agents = makeCatalog(
+    agentDef({ name: 'lead', spawns: ['explorer'] }),
+    agentDef({ name: 'explorer' }),
+  );
+
+  const events: { agent: string; tokens: number }[] = [];
+  const task = createTaskTool({ provider, tools: [], system: 'x', agents });
+  await task.run(
+    { agent: 'lead', description: 'd', prompt: '派下去' },
+    { emit: (event) => events.push({ agent: event.agent, tokens: event.tokens }) },
+  );
+
+  assert.deepEqual(
+    events.map((e) => e.agent),
+    ['explorer', 'lead'],
+    '两层都要报:孙子那层先完成,领队随后',
+  );
+});

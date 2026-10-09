@@ -8,7 +8,7 @@ import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
 import { createSkillTool } from '../tools/skill.js';
-import { agentModelWarnings, agentRoots, discoverAgents, renderAgentRoster } from '../core/agents.js';
+import { agentModelWarnings, agentRoots, agentSpawnWarnings, discoverAgents, renderAgentRoster } from '../core/agents.js';
 import { loadConfig, skillRoots } from './config.js';
 import { loadInstructions, renderInstructionNote, renderInstructionsForModel } from './instructions.js';
 import { banner, platformRefusal } from './startup.js';
@@ -71,6 +71,9 @@ async function main(): Promise<number> {
   // 刻意的(派发时回退主对话模型),但用户得知道发生了回退。
   for (const warning of agentModelWarnings(agents.list(), Object.keys(outcome.providers))) {
     process.stderr.write(`角色模型回退 —— ${warning}\n`);
+  }
+  for (const warning of agentSpawnWarnings(agents.list())) {
+    process.stderr.write(`角色 spawns 有问题 —— ${warning}\n`);
   }
 
   // 角色按名换模型:能换就换(缓存实例,同一家的角色共享一个连接层),换不出

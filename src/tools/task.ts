@@ -1,4 +1,5 @@
 import type { Tool, ToolContext } from '../core/tool.js';
+import type { LoopEvent } from '../core/loop.js';
 import { parseModelBinding, type AgentCatalog, type AgentDef } from '../core/agents.js';
 import { runSubagent } from '../core/subagent.js';
 import { createToolset } from '../core/toolset.js';
@@ -38,7 +39,32 @@ export type TaskDeps = {
   maxConcurrent?: number;
   /** 用户层的权限规则,子 agent 同样适用(它们不该绕过用户在 settings 里收的权)。 */
   rules?: readonly { pattern: string; verdict: 'allow' | 'ask' | 'deny' }[];
+  /** 当前这一层是第几层派发(主对话 = 0)。v2-09 的递归深度用。 */
+  depth?: number;
+  /** 递归深度上限。默认 2 —— 主对话 → 子 → 孙,到此为止,到顶就不再给 task 工具。 */
+  maxDepth?: number;
 };
+
+const DEFAULT_MAX_DEPTH = 2;
+
+/**
+ * 把角色名册收窄到白名单里 —— 派出去的子 agent 的 task 工具只看得见它被允许
+ * 派的那几个。收窄发生在注册表这一层,而不是运行时再拦:模型看不见的名字它
+ * 就不会去试,省掉注定被拒的一轮。
+ */
+function restrictCatalog(catalog: AgentCatalog, allowed: readonly string[]): AgentCatalog {
+  const allowedSet = new Set(allowed);
+  const visible = catalog.list().filter((def) => allowedSet.has(def.name));
+  return {
+    list: () => visible.map((def) => ({ ...def })),
+    get: (name) => {
+      if (!allowedSet.has(name)) return undefined;
+      const found = visible.find((candidate) => candidate.name === name);
+      return found ? { ...found } : undefined;
+    },
+    problems: () => [],
+  };
+}
 
 const DEFAULT_MAX_CONCURRENT = 3;
 
@@ -180,6 +206,21 @@ export function createTaskTool(deps: TaskDeps): Tool {
       restriction = resolved.restriction;
       provider = resolved.provider ?? deps.provider;
       statAgent = resolved.def.name;
+
+      // v2-09 受限递归:角色用 spawns 显式声明"我还能派谁",而且只在深度
+      // 没到顶时才给它 task 工具。到顶就剥掉 —— 这是防无限套娃的最后一道。
+      const depth = deps.depth ?? 0;
+      const maxDepth = deps.maxDepth ?? DEFAULT_MAX_DEPTH;
+      const spawns = resolved.def.spawns ?? [];
+      if (spawns.length > 0 && depth < maxDepth && agents) {
+        const child = createTaskTool({
+          ...deps,
+          agents: restrictCatalog(agents, spawns),
+          depth: depth + 1,
+          maxDepth,
+        });
+        tools = [...tools, child];
+      }
     }
 
     // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
@@ -206,6 +247,15 @@ export function createTaskTool(deps: TaskDeps): Tool {
           tools: guarded,
           system,
           ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+          // 只往上转成本行:子 agent 的工具调用过程刻意不上屏(隔离是它存在的
+          // 理由)。但**再派一层**的成本必须浮上来 —— 那笔钱是主对话付的。
+          ...(context?.emit !== undefined
+            ? {
+                onEvent: (event: LoopEvent) => {
+                  if (event.type === 'subagent-done') context.emit!(event);
+                },
+              }
+            : {}),
         },
         delegated,
         context?.signal,

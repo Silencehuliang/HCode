@@ -24,6 +24,11 @@ export type AgentDef = {
   model?: string;
   /** 权限声明,只允许收紧。原始值存这里,叠加语义归 v2-02/v2-08。 */
   permission?: string;
+  /**
+   * 这个角色还能再派谁(白名单)。**不写 = 不能再派子 agent**(v2-09)——
+   * 递归必须显式开启,默认关。见 ADR-0007 的补充说明。
+   */
+  spawns?: string[];
   /** 定义文件。 */
   path: string;
   /** 来自哪个根目录 —— 项目赢还是用户赢,要让用户看得出来。 */
@@ -54,6 +59,24 @@ export function parseModelBinding(raw: string | undefined): ModelBinding | undef
   const model = trimmed.slice(colon + 1).trim();
   if (providerId === '') return undefined;
   return model === '' ? { providerId } : { providerId, model };
+}
+
+/**
+ * 启动体检:哪些角色的 spawns 里写了不存在的角色名。
+ *
+ * 不拦下来(可能是另一个目录里还没装的角色),但要说 —— 静默的话,派发那天
+ * 才发现"这个角色派不出去",而线索在几天前写的那份文件里。
+ */
+export function agentSpawnWarnings(agents: AgentDef[]): string[] {
+  const known = new Set(agents.map((agent) => agent.name));
+  const warnings: string[] = [];
+  for (const def of agents) {
+    for (const target of def.spawns ?? []) {
+      if (known.has(target)) continue;
+      warnings.push(`角色 ${def.name} 的 spawns 里有 ${target},但没有这个角色 —— 派它会被拒。`);
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -124,12 +147,14 @@ export function parseAgentText(text: string, fallbackName: string, origin: strin
   const toolsRaw = parsed.meta.get('tools');
   const model = parsed.meta.get('model');
   const permission = parsed.meta.get('permission');
+  const spawnsRaw = parsed.meta.get('spawns');
 
   return {
     name,
     description,
     systemPrompt: parsed.body,
     ...(toolsRaw !== undefined ? { tools: parseTools(toolsRaw) } : {}),
+    ...(spawnsRaw !== undefined ? { spawns: parseTools(spawnsRaw) } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(permission !== undefined ? { permission } : {}),
     path,

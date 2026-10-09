@@ -1,4 +1,4 @@
-import { runTurn } from './loop.js';
+import { runTurn, type LoopEvent } from './loop.js';
 import { estimateMessageTokens } from './tokens.js';
 import type { Provider } from '../provider/types.js';
 import type { Toolset } from './toolset.js';
@@ -21,6 +21,18 @@ export type SubagentDeps = {
   tools: Toolset;
   system: string;
   maxTurns?: number;
+  /**
+   * 事件通道,往下传给子 agent 自己的那一轮循环。
+   *
+   * 传它是为了让**再派一层**的成本行也能浮上来:子 agent 派孙子时,那条
+   * subagent-done 事件是从它自己那一轮的上下文里发出的,不接这根线就断在这一层
+   * —— 实测就是"孙子的花费看不见",而主对话要买单。
+   *
+   * 类型是整条 LoopEvent(而不是只收 subagent-done):这是子 agent 那一轮循环的
+   * 事件口,由调用方决定转哪些上去。当前只转成本行 —— 子 agent 的工具调用过程
+   * 刻意不上屏(隔离是 runSubagent 存在的理由)。
+   */
+  onEvent?: (event: LoopEvent) => void;
 };
 
 const TURN_LIMIT_NOTE =
@@ -45,8 +57,17 @@ export async function runSubagent(
   prompt: string,
   signal?: AbortSignal,
 ): Promise<SubagentResult> {
+  // 显式拼,不用展开 —— deps.onEvent 是可选的,展开后类型带上 undefined,
+  // 与 LoopDeps 的必填签名对不上(exactOptionalPropertyTypes)。
   const result = await runTurn(
-    { ...deps, ...(signal ? { signal } : {}) },
+    {
+      provider: deps.provider,
+      tools: deps.tools,
+      system: deps.system,
+      ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+      ...(deps.onEvent !== undefined ? { onEvent: deps.onEvent } : {}),
+      ...(signal ? { signal } : {}),
+    },
     [{ role: 'user', text: prompt }],
   );
 
