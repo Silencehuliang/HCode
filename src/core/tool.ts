@@ -16,6 +16,8 @@ export type SubagentDoneEvent = {
   model: string;
   tokens: number;
   durationMs: number;
+  /** 这一趟开在独立车道上时的分支名(v2-13)。有它说明改动落在另一条分支上,没碰主工作区。 */
+  lane?: string;
 };
 
 export type ToolContext = {

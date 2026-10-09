@@ -349,3 +349,42 @@ test('expandAgentMention:未知角色 → 报错并列出可用的', () => {
   assert.match(out.message, /reviewer/);
   assert.match(out.message, /planner/);
 });
+
+test('worktree 字段:true/yes/on/1 是开,false/no/off/0 是关,不写就是不开', async () => {
+  const { project, cleanup } = await makeRoots();
+
+  try {
+    await writeFile(join(project, 'writer.md'), agentFile('name: writer\ndescription: 会改文件\nworktree: true'));
+    await writeFile(join(project, 'quiet.md'), agentFile('name: quiet\ndescription: 不掺和\nworktree: off'));
+    await writeFile(join(project, 'plain.md'), agentFile('name: plain\ndescription: 没写这一行'));
+
+    const catalog = await discoverAgents([project]);
+    assert.deepStrictEqual(catalog.problems(), []);
+
+    assert.equal(catalog.get('writer')!.worktree, true);
+    assert.equal(catalog.get('quiet')!.worktree, false);
+    assert.equal('worktree' in catalog.get('plain')!, false, '没写这一行就不该有这个键');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('worktree 的值看不懂 → 报错,而不是当成"没开"', async () => {
+  const { project, cleanup } = await makeRoots();
+
+  try {
+    await writeFile(join(project, 'maybe.md'), agentFile('name: maybe\ndescription: 含糊\nworktree: 也许吧'));
+
+    const catalog = await discoverAgents([project]);
+
+    const problems = catalog.problems();
+    assert.equal(problems.length, 1);
+    assert.match(problems[0]!, /maybe\.md/);
+    assert.match(problems[0]!, /worktree 的值看不懂/);
+    assert.match(problems[0]!, /也许吧/, '要把原文抄回去,不然人不知道自己写了什么');
+    assert.match(problems[0]!, /worktree: true/, '要给出写法');
+    assert.equal(catalog.get('maybe'), undefined, '写错了就当这个角色不存在 —— 看着像在车道上比不在车道上危险得多');
+  } finally {
+    await cleanup();
+  }
+});

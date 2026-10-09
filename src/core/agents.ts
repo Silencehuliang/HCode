@@ -7,10 +7,11 @@ import { BUILTIN_AGENT_DEFS, BUILTIN_AGENT_ORIGIN } from './builtin-agents.js';
 /**
  * 一个角色 = 一份 md 文件。
  *
- * frontmatter 只收 5 个字段 —— name / description / tools / model / permission。
- * 每加一个字段都要过一遍"没有它角色还能不能用"的拷问(见 ADR-0007):
- * 这 5 个是"能不能派出去、派成什么样"的最小完备集,再多的都属于调优,
- * 调优可以等,复杂度闸门先守住。
+ * frontmatter 只收最小完备集那类字段 —— name / description / tools / model /
+ * permission,加上后来过闸门的两条:spawns(v2-09)、output(v2-10),以及
+ * worktree(v2-13)。每加一个字段都要过一遍"这个字段被谁执行"的拷问(见 ADR-0007):
+ * 被 harness 执行的(筛工具、挑 Provider、收窄名册、校验结论、开车道)可以加;
+ * 只被模型读来调自己偏好的(temperature / max-turns / thinking-level)不加。
  */
 export type AgentDef = {
   name: string;
@@ -34,6 +35,12 @@ export type AgentDef = {
    * 键在不在,不看类型。不写 = 不做校验,拿到什么回什么。
    */
   output?: string[];
+  /**
+   * 放进独立的 git worktree 里干活(v2-13)。**只有会写文件的角色需要它** ——
+   * 只读角色开车道毫无意义(改不了东西,还把主工作区的代码从它的搜索范围里
+   * 拿掉了)。不写 = 就在当前工作区干活。见 ADR-0010。
+   */
+  worktree?: boolean;
   /** 定义文件。 */
   path: string;
   /** 来自哪个根目录 —— 项目赢还是用户赢,要让用户看得出来。 */
@@ -132,6 +139,25 @@ function parseTools(raw: string): string[] {
     .filter(Boolean);
 }
 
+const TRUE_WORDS = new Set(['true', 'yes', 'on', '1']);
+const FALSE_WORDS = new Set(['false', 'no', 'off', '0']);
+
+/**
+ * worktree 字段:写 `true` 就是开。
+ *
+ * 宽容一点(`yes`/`on`/`1` 都算真)—— YAML 本来就这么认,而人是照着记忆写的。
+ * 认不出来的值返回 undefined 由调用方报错:**不能被静默当成"没写"**。那样用户
+ * 以为自己在车道上跑(隔离、产分支),实际上子 agent 直接改了他的工作区 ——
+ * 这个误解的代价正好是这个字段存在的全部理由。
+ */
+export function parseWorktreeFlag(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const value = raw.trim().toLowerCase();
+  if (TRUE_WORDS.has(value)) return true;
+  if (FALSE_WORDS.has(value)) return false;
+  return undefined;
+}
+
 /** 解析一份角色文本(文件读出来或内置嵌入的,同一套契约)。 */
 export function parseAgentText(text: string, fallbackName: string, origin: string, path: string): AgentDef | string {
   const parsed = parseFrontmatter(text);
@@ -147,13 +173,21 @@ export function parseAgentText(text: string, fallbackName: string, origin: strin
     return `${path}:frontmatter 里没有 description。一句话说明是花名册派发的依据 —— 没有它,主对话不知道什么时候该派这个角色。`;
   }
 
-  // 5 字段之外一律忽略:不报错(它可能是为别家 harness 写的),但也不生效。
+  // 最小完备集之外的字段一律忽略:不报错(它可能是为别家 harness 写的),但也不生效。
   // 报错会把"顺手多写了个 temperature"变成拦路虎,而那不过是无关紧要的噪音。
   const toolsRaw = parsed.meta.get('tools');
   const model = parsed.meta.get('model');
   const permission = parsed.meta.get('permission');
   const spawnsRaw = parsed.meta.get('spawns');
   const outputRaw = parsed.meta.get('output');
+  const worktreeRaw = parsed.meta.get('worktree');
+
+  // worktree 是例外:它的值认不出来时必须报错。别的字段写错最坏是"没生效",
+  // 这一个写错最坏是"用户以为在车道上、其实子 agent 正在改他的工作区"。
+  const worktree = parseWorktreeFlag(worktreeRaw);
+  if (worktreeRaw !== undefined && worktree === undefined) {
+    return `${path}:worktree 的值看不懂(${worktreeRaw.trim()})。要开车道就写 worktree: true,不要就整行删掉。`;
+  }
 
   return {
     name,
@@ -164,6 +198,7 @@ export function parseAgentText(text: string, fallbackName: string, origin: strin
     ...(outputRaw !== undefined ? { output: parseTools(outputRaw) } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(permission !== undefined ? { permission } : {}),
+    ...(worktree !== undefined ? { worktree } : {}),
     path,
     origin,
   };

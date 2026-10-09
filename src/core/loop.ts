@@ -18,7 +18,15 @@ export type LoopEvent =
   | { type: 'tool-call'; name: string; input: unknown }
   | { type: 'tool-result'; output: string }
   /** 子 agent 派发结束(由 task 工具经 ToolContext.emit 报上来)。 */
-  | { type: 'subagent-done'; agent: string; model: string; tokens: number; durationMs: number };
+  | {
+      type: 'subagent-done';
+      agent: string;
+      model: string;
+      tokens: number;
+      durationMs: number;
+      /** 这一趟开在车道上时的分支名(v2-13)。 */
+      lane?: string;
+    };
 
 export type LoopDeps = {
   provider: Provider;

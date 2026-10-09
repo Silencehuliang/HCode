@@ -130,6 +130,9 @@ async function main(): Promise<number> {
     allTools: mainTools,
     rules: outcome.rules,
     registry: createTaskRegistry(),
+    // 车道(v2-13)在哪个目录上开车:会话启动的那个目录。显式传,不去猜
+    // process.cwd() —— 子 agent 的相对路径最终是钉在这个根上的。
+    cwd,
   });
 
   await startRepl({

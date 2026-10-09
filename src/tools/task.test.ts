@@ -9,6 +9,9 @@ import { createTaskRegistry } from '../core/task-registry.js';
 import type { SubagentDoneEvent, ToolContext } from '../core/tool.js';
 import type { AgentCatalog, AgentDef } from '../core/agents.js';
 import type { Tool } from '../core/tool.js';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import type { GitOutcome, GitRunner } from '../core/lane.js';
 import type { Message, Provider, ProviderRequest, ProviderResponse } from '../provider/types.js';
 
 function scripted(
@@ -1333,4 +1336,211 @@ test('派/查/追问三个工具的结果进压缩器后,调用与结果仍然�
       );
     }
   }
+});
+
+// ---------- v2-13 车道装配 ----------
+
+const LANE_REPO = join(tmpdir(), 'fake-lane-repo');
+const OK_GIT: GitOutcome = { code: 0, stdout: '', stderr: '' };
+
+/** 一个假 git:开车道、收尾全成功,改动按 `changes` 给。记下每条命令行。 */
+function laneGit(changes = ' M a.ts\n'): { git: GitRunner; calls: string[][] } {
+  const calls: string[][] = [];
+  const git: GitRunner = async (args) => {
+    calls.push([...args]);
+    if (args[0] === 'rev-parse') return { code: 0, stdout: `${LANE_REPO}\n`, stderr: '' };
+    if (args[0] === 'status') return { code: 0, stdout: changes, stderr: '' };
+    return OK_GIT;
+  };
+  return { git, calls };
+}
+
+/** 一个把收到的 input 记下来的工具 —— 用来验证相对路径有没有被钉到车道上。 */
+function spyTool(name: string, withPath: boolean): { tool: Tool; seen: Record<string, unknown>[] } {
+  const seen: Record<string, unknown>[] = [];
+  return {
+    seen,
+    tool: {
+      spec: {
+        name,
+        description: name,
+        inputSchema: {
+          type: 'object',
+          properties: withPath ? { path: { type: 'string' } } : { prompt: { type: 'string' } },
+        },
+      },
+      async run(input) {
+        seen.push(input as Record<string, unknown>);
+        return 'ok';
+      },
+    },
+  };
+}
+
+test('车道角色:子 agent 的相对路径被钉到车道上,系统提示里带着车道的规矩', async () => {
+  const spy = spyTool('read_file', true);
+  const { git } = laneGit();
+  const sub = scripted(
+    { text: null, toolCalls: [{ id: 'c1', name: 'read_file', input: { path: 'src/a.js' } }] },
+    { text: '看过了', toolCalls: [] },
+  );
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [spy.tool],
+    system: '基线提示',
+    cwd: LANE_REPO,
+    git,
+    agents: makeCatalog(agentDef({ name: 'writer', worktree: true })),
+  });
+
+  const out = await task.run({ agent: 'writer', description: '加一行', prompt: '看看 a.js' });
+
+  assert.equal(spy.seen.length, 1, '子 agent 读了一次文件');
+  const seenPath = String(spy.seen[0]!.path);
+  assert.ok(seenPath.endsWith(join('src', 'a.js')), `相对路径要拼上车道。实际 ${seenPath}`);
+  assert.ok(
+    seenPath.includes('.hcode-worktrees'),
+    `钉的必须是车道那个目录,不是主工作区。实际 ${seenPath}`,
+  );
+
+  const system = sub.requests[0]!.system;
+  assert.ok(system.startsWith('角色提示'), '车道说明是追加的,角色自己的系统提示原样在前');
+  assert.match(system, /相对路径/);
+  assert.match(system, /\.hcode-worktrees/);
+
+  assert.match(out, /\[车道\]/);
+  assert.match(out, /hcode\/writer-\d{8}-\d{6}/, '结论后面要挂回分支名 —— 那是用户唯一能用的东西');
+  assert.match(out, /git merge hcode\/writer-/);
+});
+
+test('车道角色:跑完了就收尾 —— 提交到分支再拆目录', async () => {
+  const { git, calls } = laneGit();
+  const sub = scripted({ text: '改好了', toolCalls: [] });
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [],
+    system: 's',
+    cwd: LANE_REPO,
+    git,
+    agents: makeCatalog(agentDef({ name: 'writer', worktree: true })),
+  });
+
+  await task.run({ agent: 'writer', description: '加一行', prompt: '加一行' });
+
+  assert.deepEqual(
+    calls.map((call) => call.slice(0, 2).join(' ')),
+    ['rev-parse --show-toplevel', 'worktree add', 'status --porcelain', 'add -A', 'commit -m', 'worktree remove'],
+    '一趟车道:开、跑、提交、拆 —— 少哪一步都会把东西留在用户机器上',
+  );
+});
+
+test('车道角色:子 agent 自己炸了,车道照样收尾 —— 不能把它丢在原地', async () => {
+  const { git, calls } = laneGit();
+  const sub = scripted(new Error('模型挂了'));
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [],
+    system: 's',
+    cwd: LANE_REPO,
+    git,
+    agents: makeCatalog(agentDef({ name: 'writer', worktree: true })),
+  });
+
+  const out = await task.run({ agent: 'writer', description: '加一行', prompt: '加一行' });
+
+  assert.match(out, /子任务「加一行」失败了/);
+  assert.match(out, /模型挂了/);
+  assert.ok(
+    calls.some((call) => call[0] === 'worktree' && call[1] === 'remove'),
+    '失败了更不能把车道留在磁盘上',
+  );
+});
+
+test('worktree + read-only:当场拒,而且一条 git 命令都不发', async () => {
+  const { git, calls } = laneGit();
+
+  const task = createTaskTool({
+    provider: scripted({ text: 'x', toolCalls: [] }).provider,
+    tools: [],
+    system: 's',
+    cwd: LANE_REPO,
+    git,
+    agents: makeCatalog(
+      agentDef({ name: 'odd', worktree: true, permission: 'read-only' }),
+    ),
+  });
+
+  const out = await task.run({ agent: 'odd', description: 'd', prompt: 'p' });
+
+  assert.match(out, /同时写了 worktree 和 permission: read-only/);
+  assert.match(out, /把其中一行删掉/);
+  assert.deepEqual(calls, [], '配置本身就自相矛盾,不该先在用户机器上开一个 worktree 再说');
+});
+
+test('worktree 角色不能用 background 派 —— 没人给它收尾', async () => {
+  const { git, calls } = laneGit();
+  const registry = createTaskRegistry();
+
+  const task = createTaskTool({
+    provider: scripted({ text: 'x', toolCalls: [] }).provider,
+    tools: [],
+    system: 's',
+    cwd: LANE_REPO,
+    git,
+    registry,
+    agents: makeCatalog(agentDef({ name: 'writer', worktree: true })),
+  });
+
+  const out = await task.run({ agent: 'writer', description: 'd', prompt: 'p', background: true });
+
+  assert.match(out, /不能用 background 派/);
+  assert.match(out, /去掉 background 直接派/);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(registry.list(), [], '连任务表都不该留一条 —— 它压根没跑');
+});
+
+test('不在 git 仓库里用车道角色:把 git 的原话和出路一起说清楚', async () => {
+  const sub = scripted({ text: '不该跑起来', toolCalls: [] });
+  const git: GitRunner = async (args) =>
+    args[0] === 'rev-parse'
+      ? { code: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
+      : OK_GIT;
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [],
+    system: 's',
+    cwd: '/nowhere',
+    git,
+    agents: makeCatalog(agentDef({ name: 'writer', worktree: true })),
+  });
+
+  const out = await task.run({ agent: 'writer', description: 'd', prompt: 'p' });
+
+  assert.match(out, /不在一个 git 仓库里/);
+  assert.match(out, /fatal: not a git repository/);
+  assert.deepEqual(sub.requests, [], '车道都没开起来,不能让它照着主工作区跑一趟');
+});
+
+test('没写 worktree 的角色:一步都不碰 git(老行为逐字不变)', async () => {
+  const { git, calls } = laneGit();
+  const sub = scripted({ text: '结论', toolCalls: [] });
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [],
+    system: 's',
+    cwd: LANE_REPO,
+    git,
+    agents: makeCatalog(agentDef({ name: 'other' })),
+  });
+
+  const out = await task.run({ agent: 'other', description: 'd', prompt: 'p' });
+
+  assert.equal(out, '结论');
+  assert.equal(sub.requests[0]!.system, '角色提示');
+  assert.deepEqual(calls, []);
 });

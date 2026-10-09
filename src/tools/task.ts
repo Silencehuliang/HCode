@@ -10,6 +10,16 @@ import {
   retryInstruction,
 } from '../core/output-contract.js';
 import { createToolset, type Toolset } from '../core/toolset.js';
+import {
+  closeLane,
+  laneFooter,
+  laneNote,
+  openLane,
+  relocateTools,
+  type GitRunner,
+  type Lane,
+  type LaneClose,
+} from '../core/lane.js';
 import { guardToolsetForAgent, isZeroBlastRadius, parseAgentRestriction } from '../core/permission.js';
 import type { AgentRestriction } from '../core/permission.js';
 import type { Message, Provider } from '../provider/types.js';
@@ -55,6 +65,13 @@ export type TaskDeps = {
   depth?: number;
   /** 递归深度上限。默认 2 —— 主对话 → 子 → 孙,到此为止,到顶就不再给 task 工具。 */
   maxDepth?: number;
+  /**
+   * 开车道时用的 git 执行器(v2-13)。缺省是真去跑 git;单测换掉它,
+   * 免得在谁的真仓库里开出车道来。
+   */
+  git?: GitRunner;
+  /** 当前工作目录(车道从哪个仓库开出来)。缺省 process.cwd()。 */
+  cwd?: string;
 };
 
 const DEFAULT_MAX_DEPTH = 2;
@@ -193,6 +210,8 @@ type RunPlan = {
   /** 委派 prompt(还没拼输出约定 —— 那一步在 executeRun 里,续跑要拼同一份)。 */
   delegated: string;
   outputFields?: readonly string[];
+  /** 这一趟开在独立车道上(v2-13)。有它就由 executeRun 负责收尾(提交 + 拆目录)。 */
+  lane?: Lane;
 };
 
 const BACKGROUND_NO_APPROVAL =
@@ -201,12 +220,15 @@ const BACKGROUND_NO_APPROVAL =
 /**
  * 装配一次派发。放在模块层而不是 createTaskTool 里,是因为**续跑**要用同一套
  * 装配:followup 只该换起点(消息数组),不该顺便换一套角色解析规则。
+ *
+ * 它是 async 的**只因为车道**:开车道要问 git(仓库在哪、能不能开),而 git
+ * 是外部进程。别的装配步骤全是纯计算。
  */
-function prepareRun(
+async function prepareRun(
   deps: TaskDeps,
   spec: TaskSpec,
   options: { approve?: ToolContext['approve']; background?: boolean },
-): { plan: RunPlan } | { error: string } {
+): Promise<{ plan: RunPlan } | { error: string }> {
   const agents = deps.agents;
   let system = deps.system;
   let tools = deps.tools;
@@ -216,6 +238,7 @@ function prepareRun(
   let statAgent = 'explorer';
   /** 角色声明的输出约定(v2-10)。没声明就是 undefined,行为与从前一致。 */
   let outputFields: readonly string[] | undefined;
+  let lane: Lane | undefined;
 
   if (spec.agent !== undefined && spec.agent.trim() !== '') {
     const resolved = resolveAgentRun(deps, spec.agent.trim());
@@ -242,6 +265,37 @@ function prepareRun(
         maxDepth,
       });
       tools = [...tools, child];
+    }
+
+    // v2-13 车道:角色声明 worktree: true 就在独立检出里干活。
+    if (resolved.def.worktree === true) {
+      if (restriction === 'read-only') {
+        return {
+          error: `角色 ${statAgent} 同时写了 worktree 和 permission: read-only —— 只读角色改不了文件,开车道没有意义(它只是让这个角色的搜索范围少掉主工作区的代码)。把其中一行删掉。`,
+        };
+      }
+      // 后台派发与车道不搭:车道要"跑完立刻收尾"(提交 + 拆目录),而后台任务
+      // 的收尾时刻不在任何人的手上。宁可不做,也不要留下一条没人收的车道。
+      if (options.background === true) {
+        return {
+          error: `角色 ${statAgent} 是 worktree 车道角色,不能用 background 派 —— 车道要在这一趟里收尾(提交到分支 + 拆掉目录),后台跑完没人做这件事。去掉 background 直接派,它跑完就回来。`,
+        };
+      }
+
+      const opened = await openLane({
+        agent: statAgent,
+        description: spec.description,
+        cwd: deps.cwd ?? process.cwd(),
+        ...(deps.git !== undefined ? { git: deps.git } : {}),
+      });
+      if (!opened.ok) {
+        return { error: opened.message };
+      }
+      lane = opened.lane;
+      // 相对路径钉在车道上 —— 少了这一步,子 agent 会一边"在车道里"一边把文件
+      // 写进主工作区。
+      tools = relocateTools(tools, lane.path);
+      system = `${system}\n\n${laneNote(lane)}`;
     }
   }
 
@@ -278,6 +332,7 @@ ${spec.prompt}` : spec.prompt;
       guarded,
       delegated,
       ...(outputFields !== undefined ? { outputFields } : {}),
+      ...(lane !== undefined ? { lane } : {}),
     },
   };
 }
@@ -297,8 +352,11 @@ ${contractInstruction(fields)}`
  *
  * history 是起点:空数组 = 冷启动;非空 = 在原对话上续跑(v2-11 的 followup)。
  * 这两件事的差别只有"有没有把历史带上",所以是同一个函数。
+ *
+ * 这里**不碰车道** —— 车道的收尾(提交 + 拆目录)必须在所有出口上都发生,
+ * 包括子 agent 抛错、用户中断,所以它被包在外面那层(见 executeRun)。
  */
-async function executeRun(
+async function runBody(
   deps: TaskDeps,
   plan: RunPlan,
   channel: { signal?: AbortSignal; emit?: (event: SubagentDoneEvent) => void },
@@ -360,9 +418,57 @@ ${retryInstruction(check.missing)}`);
     model: plan.provider.model,
     tokens: totalTokens,
     durationMs: Date.now() - startedAt,
+    ...(plan.lane !== undefined ? { lane: plan.lane.branch } : {}),
   });
 
   return { text: result.text, tokens: totalTokens, messages: result.messages };
+}
+
+/**
+ * 跑一趟派发,**并负责车道的收尾**。
+ *
+ * 收尾必须发生在所有出口上:跑完了、子 agent 抛错了、用户按了 Ctrl+C 抛出来
+ * 的中断 —— 三条路都得把车道提交并拆掉,不然用户的工作区旁边会慢慢堆起一堆
+ * 谁也不认识的 worktree 目录。所以它是 try/finally 的形状,而不是"跑完了顺手清理"。
+ *
+ * 收尾的说明(改了几项、提交到哪条分支、哪一步没走顺)挂在结论后面回给模型 ——
+ * 那是它唯一能转达给用户的通道。
+ */
+async function executeRun(
+  deps: TaskDeps,
+  plan: RunPlan,
+  channel: { signal?: AbortSignal; emit?: (event: SubagentDoneEvent) => void },
+  prompt: string,
+  history: Message[] = [],
+): Promise<{ text: string; tokens: number; messages: Message[] }> {
+  if (plan.lane === undefined) {
+    return runBody(deps, plan, channel, prompt, history);
+  }
+
+  const lane = plan.lane;
+  let outcome: { text: string; tokens: number; messages: Message[] } | undefined;
+  let failure: unknown;
+
+  try {
+    outcome = await runBody(deps, plan, channel, prompt, history);
+  } catch (error) {
+    failure = error;
+  }
+
+  let closed: LaneClose | undefined;
+  try {
+    closed = await closeLane({ lane, ...(deps.git !== undefined ? { git: deps.git } : {}) });
+  } catch (error) {
+    // closeLane 自己承诺不抛;真抛了也绝不能让收尾把结论顶掉。
+    closed = { committed: false, files: 0, note: `车道收尾时出了意外 —— ${(error as Error).message}。车道目录在 ${lane.path},分支是 ${lane.branch}。` };
+  }
+
+  if (failure !== undefined) {
+    throw failure;
+  }
+
+  const finished = outcome!;
+  return { ...finished, text: `${finished.text}\n\n${laneFooter(lane, closed)}` };
 }
 
 /**
@@ -383,9 +489,9 @@ export function createTaskTool(deps: TaskDeps): Tool {
     ? `可用角色:${agents.list().map((agent) => `${agent.name}(${agent.description})`).join(';')}。`
     : '';
 
-    /** 派一个子 agent,带回它的结论。批量与单发共用这一条路径。 */
+  /** 派一个子 agent,带回它的结论。批量与单发共用这一条路径。 */
   async function runOne(spec: TaskSpec, context: ToolContext | undefined): Promise<string> {
-    const prepared = prepareRun(deps, spec, {
+    const prepared = await prepareRun(deps, spec, {
       ...(context?.approve !== undefined ? { approve: context.approve } : {}),
     });
     if ('error' in prepared) {
@@ -423,8 +529,8 @@ export function createTaskTool(deps: TaskDeps): Tool {
    *   `task_status` 主动去取。往对话里注消息会破坏压缩器"工具调用与结果成对"的
    *   假设 —— 那条假设一旦破,压缩后的历史就会缺一半。
    */
-  function startBackground(spec: TaskSpec, registry: TaskRegistry): string {
-    const prepared = prepareRun(deps, spec, { background: true });
+  async function startBackground(spec: TaskSpec, registry: TaskRegistry): Promise<string> {
+    const prepared = await prepareRun(deps, spec, { background: true });
     if ('error' in prepared) {
       return prepared.error;
     }
@@ -558,7 +664,7 @@ ${results[index]}`),
         if (!registry) {
           return '这个会话没有任务表,后台派发不可用 —— 去掉 background 直接派,就会等它跑完再回来。';
         }
-        return startBackground(spec, registry);
+        return await startBackground(spec, registry);
       }
 
       return runOne(spec, context);
@@ -686,7 +792,7 @@ export function createTaskFollowupTool(deps: TaskDeps): Tool {
         return `任务 ${id} 失败了,没有可以接着跑的历史。错误原文:${entry.error ?? '(没有错误信息)'}。要重来就重新派一次。`;
       }
 
-      const prepared = prepareRun(deps, entry.spec, {
+      const prepared = await prepareRun(deps, entry.spec, {
         ...(context?.approve !== undefined ? { approve: context.approve } : {}),
       });
       if ('error' in prepared) {
