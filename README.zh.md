@@ -23,10 +23,14 @@ hcode 把命令交给 `powershell.exe` 执行。它不支持 bash、cmd 或 WSL,
 hcode 还没发布到 npm registry,暂时从源码装:
 
 ```powershell
-npm i -g github:Silencehuliang/HCode
+git clone https://github.com/Silencehuliang/HCode.git
+cd HCode
+npm install
+npm run build
+npm i -g .
 ```
 
-(发布之后这里会改成 `npm i -g hcode`。)
+为什么要绕这几步:一行 `npm i -g github:Silencehuliang/HCode` 本该可行,但 npm 全局安装 git 依赖时,不会在跑 `prepare` 脚本**之前**装上 devDependencies —— 构建这一步找不到 `tsc`,装出来的是空包。这是 [npm/cli#8440](https://github.com/npm/cli/issues/8440),至今未修。(发布之后这一节会改成 `npm i -g hcode`,问题自然消失。)
 
 ## 配置
 

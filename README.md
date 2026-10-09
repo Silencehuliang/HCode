@@ -23,10 +23,14 @@ The 5.1 floor matters for the model, not for you: 5.1 has no `&&`, no `??`, and 
 hcode is not yet on the npm registry. Install from source for now:
 
 ```powershell
-npm i -g github:Silencehuliang/HCode
+git clone https://github.com/Silencehuliang/HCode.git
+cd HCode
+npm install
+npm run build
+npm i -g .
 ```
 
-(Once published, this becomes `npm i -g hcode`.)
+Why the long way: a one-line `npm i -g github:Silencehuliang/HCode` should work, but npm does not install devDependencies before running a git dependency's `prepare` script when installing globally, so the build step finds no `tsc` and the install fails with an empty package. That is [npm/cli#8440](https://github.com/npm/cli/issues/8440), still open. (Once hcode is published, this section becomes `npm i -g hcode` and the problem disappears.)
 
 ## Configure
 
