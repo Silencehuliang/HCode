@@ -1005,3 +1005,96 @@ test('再派一层的成本也会浮上来(孙子的花费不吞掉)', async () 
     '两层都要报:孙子那层先完成,领队随后',
   );
 });
+
+// ---------- v2-10:结构化输出(宽松校验) ----------
+
+test('声明 output 的角色:缺字段触发一次重试,第二次合格就回结论', async () => {
+  const sub = scripted(
+    { text: '{"结论":"在 a.ts"}', toolCalls: [] },
+    { text: '{"结论":"在 a.ts","风险":"无"}', toolCalls: [] },
+  );
+
+  const agents = makeCatalog(agentDef({ name: 'reviewer', output: ['结论', '风险'] }));
+  const tool = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  const output = await tool.run({ agent: 'reviewer', description: 'd', prompt: '审一下' });
+
+  assert.equal(sub.requests.length, 2, '该正好重试一次');
+  assert.match(String(output), /风险/, '回的应该是第二次那份');
+  // 重试那次的 prompt 里点明了缺什么。
+  const retryPrompt = sub.requests[1]!.messages[0] as { text: string };
+  assert.match(retryPrompt.text, /风险/);
+  assert.match(retryPrompt.text, /只回一个 JSON/);
+});
+
+test('重试仍不合格:错误原文回主对话,语义不变', async () => {
+  const sub = scripted(
+    { text: '{"结论":"在 a.ts"}', toolCalls: [] },
+    { text: '还是那句散文,没有 JSON', toolCalls: [] },
+  );
+
+  const agents = makeCatalog(agentDef({ name: 'reviewer', output: ['结论', '风险'] }));
+  const tool = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  const output = (await tool.run({ agent: 'reviewer', description: 'd', prompt: '审一下' })) as string;
+
+  assert.equal(sub.requests.length, 2, '只重试一次,不做第三轮讨要');
+  assert.match(output, /reviewer/);
+  assert.match(output, /风险/, '要说清缺的是什么');
+  assert.match(output, /还是那句散文/, '原文照传 —— 人自己还能看');
+});
+
+test('约定的话拼在委派 prompt 里,不是塞进系统提示', async () => {
+  const sub = scripted({ text: '{"结论":"ok"}', toolCalls: [] });
+  const agents = makeCatalog(agentDef({ name: 'reviewer', output: ['结论'] }));
+  const tool = createTaskTool({ provider: sub.provider, tools: [], system: '角色系统提示', agents });
+
+  await tool.run({ agent: 'reviewer', description: 'd', prompt: '审一下' });
+
+  const first = sub.requests[0]!;
+  const prompt = (first.messages[0] as { text: string }).text;
+  assert.match(prompt, /审一下/);
+  assert.match(prompt, /输出约定/);
+  assert.equal(first.system, '角色提示', '系统提示仍是角色文件里那份,没被掺东西');
+});
+
+test('不声明 output 的角色:prompt 原样、结论原样 —— 与从前逐字一致', async () => {
+  const sub = scripted({ text: '我觉得还行吧', toolCalls: [] });
+  const agents = makeCatalog(agentDef({ name: 'reviewer' }));
+  const tool = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  const output = await tool.run({ agent: 'reviewer', description: 'd', prompt: '裸任务' });
+
+  assert.equal(output, '我觉得还行吧');
+  const first = sub.requests[0]!;
+  assert.equal((first.messages[0] as { text: string }).text, '裸任务', '不套前缀、不加约定');
+  assert.equal(sub.requests.length, 1, '不校验就不会有第二次');
+});
+
+test('重试那一次的花费也算进成本行', async () => {
+  const sub = scripted(
+    { text: '{"结论":"a"}', toolCalls: [] },
+    { text: '{"结论":"a","风险":"b"}', toolCalls: [] },
+  );
+  const agents = makeCatalog(agentDef({ name: 'reviewer', output: ['结论', '风险'] }));
+  const tool = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  const events: SubagentDoneEvent[] = [];
+  await tool.run(
+    { agent: 'reviewer', description: 'd', prompt: '审一下' },
+    { emit: (event) => events.push(event) },
+  );
+
+  assert.equal(events.length, 1, '一趟派发只报一行');
+  const expected = sub.requests.reduce(
+    (sum, request) =>
+      sum + estimateMessageTokens([{ role: 'user', text: (request.messages[0] as { text: string }).text }]),
+    0,
+  );
+  // 两次会话的估算之和 > 单次 —— 只报第一次会把重试的钱藏起来。
+  const single = estimateMessageTokens([
+    { role: 'user', text: (sub.requests[0]!.messages[0] as { text: string }).text },
+  ]);
+  assert.ok(events[0]!.tokens >= single, `报的要多于单次(${events[0]!.tokens} vs ${single})`);
+  assert.ok(expected > 0);
+});

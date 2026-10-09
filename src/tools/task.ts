@@ -2,6 +2,12 @@ import type { Tool, ToolContext } from '../core/tool.js';
 import type { LoopEvent } from '../core/loop.js';
 import { parseModelBinding, type AgentCatalog, type AgentDef } from '../core/agents.js';
 import { runSubagent } from '../core/subagent.js';
+import {
+  checkOutput,
+  contractFailure,
+  contractInstruction,
+  retryInstruction,
+} from '../core/output-contract.js';
 import { createToolset } from '../core/toolset.js';
 import { guardToolsetForAgent, isZeroBlastRadius, parseAgentRestriction } from '../core/permission.js';
 import type { AgentRestriction } from '../core/permission.js';
@@ -195,6 +201,8 @@ export function createTaskTool(deps: TaskDeps): Tool {
     let provider = deps.provider;
     // 统计行上的角色名:点名的用它,没点名就是缺省的探查者(内置 explorer)。
     let statAgent = 'explorer';
+    /** 角色声明的输出约定(v2-10)。没声明就是 undefined,行为与从前一致。 */
+    let outputFields: readonly string[] | undefined;
 
     if (spec.agent !== undefined && spec.agent.trim() !== '') {
       const resolved = resolveAgentRun(deps, spec.agent.trim());
@@ -206,6 +214,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
       restriction = resolved.restriction;
       provider = resolved.provider ?? deps.provider;
       statAgent = resolved.def.name;
+      outputFields = resolved.def.output;
 
       // v2-09 受限递归:角色用 spawns 显式声明"我还能派谁",而且只在深度
       // 没到顶时才给它 task 工具。到顶就剥掉 —— 这是防无限套娃的最后一道。
@@ -225,10 +234,18 @@ export function createTaskTool(deps: TaskDeps): Tool {
 
     // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
     // 背景与任务分开传,拼起来给它,让它一眼分清"环境"与"要做的事"。
-    const delegated =
-      spec.context !== undefined && spec.context.trim() !== ''
-        ? `背景:\n${spec.context.trim()}\n\n任务:\n${body}`
-        : body;
+    // 输出约定(v2-10)也拼在这里:它是这一趟派发的规矩,不是角色一辈子的话术。
+    //
+    // 没有 context、也没有约定时,委派 prompt 就是**原样的 body** —— v1 起
+    // 就是逐字如此,不能因为多加了两个可选功能就给所有派发套一层前缀。
+    const contextText =
+      spec.context !== undefined && spec.context.trim() !== '' ? spec.context.trim() : undefined;
+    const parts: string[] =
+      contextText !== undefined ? [`背景:\n${contextText}`, `任务:\n${body}`] : [body];
+    if (outputFields !== undefined && outputFields.length > 0) {
+      parts.push(contractInstruction(outputFields));
+    }
+    const delegated = parts.join('\n\n');
 
     // 子 agent 的工具集必须过守门:角色可以继承主对话全量工具,不过这一层
     // 它就是一台没有守门的 Remove-Item 机器。approve 从 ToolContext 递来的
@@ -241,33 +258,53 @@ export function createTaskTool(deps: TaskDeps): Tool {
 
     const startedAt = Date.now();
     try {
-      const result = await runSubagent(
-        {
-          provider,
-          tools: guarded,
-          system,
-          ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
-          // 只往上转成本行:子 agent 的工具调用过程刻意不上屏(隔离是它存在的
-          // 理由)。但**再派一层**的成本必须浮上来 —— 那笔钱是主对话付的。
-          ...(context?.emit !== undefined
-            ? {
-                onEvent: (event: LoopEvent) => {
-                  if (event.type === 'subagent-done') context.emit!(event);
-                },
-              }
-            : {}),
-        },
-        delegated,
-        context?.signal,
-      );
+      const runOnce = (prompt: string) =>
+        runSubagent(
+          {
+            provider,
+            tools: guarded,
+            system,
+            ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+            // 只往上转成本行:子 agent 的工具调用过程刻意不上屏(隔离是它存在的
+            // 理由)。但**再派一层**的成本必须浮上来 —— 那笔钱是主对话付的。
+            ...(context?.emit !== undefined
+              ? {
+                  onEvent: (event: LoopEvent) => {
+                    if (event.type === 'subagent-done') context.emit!(event);
+                  },
+                }
+              : {}),
+          },
+          prompt,
+          context?.signal,
+        );
+
+      let result = await runOnce(delegated);
+      let totalTokens = result.tokens;
+
+      // v2-10:声明了输出约定的角色,结论要过一遍宽松校验。不合格**只给一次**
+      // 重试 —— 再拉长就成了反复讨要;而模型反复给不出来的那件事,人自己看原文
+      // 更有用。校验本身只看键在不在,不看类型(见 output-contract.ts)。
+      if (outputFields !== undefined && outputFields.length > 0) {
+        let check = checkOutput(result.text, outputFields);
+        if (!check.ok) {
+          result = await runOnce(`${delegated}\n\n${retryInstruction(check.missing)}`);
+          totalTokens += result.tokens;
+          check = checkOutput(result.text, outputFields);
+          if (!check.ok) {
+            result = { ...result, text: contractFailure(statAgent, check.missing, result.text) };
+          }
+        }
+      }
 
       // 成本回显:多角色最大的隐性代价是 token,先让用户看见。没有 emit 通道
       // (单测、非交互调用)就只是不报 —— 派发本身不受影响。
+      // 计的是**这一趟**的总账:重试那一次也付了钱,不能只报第一次。
       context?.emit?.({
         type: 'subagent-done',
         agent: statAgent,
         model: provider.model,
-        tokens: result.tokens,
+        tokens: totalTokens,
         durationMs: Date.now() - startedAt,
       });
 

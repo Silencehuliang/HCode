@@ -29,6 +29,11 @@ export type AgentDef = {
    * 递归必须显式开启,默认关。见 ADR-0007 的补充说明。
    */
   spawns?: string[];
+  /**
+   * 输出约定(v2-10):这个角色的结论必须带哪些键。只做**宽松校验** ——
+   * 键在不在,不看类型。不写 = 不做校验,拿到什么回什么。
+   */
+  output?: string[];
   /** 定义文件。 */
   path: string;
   /** 来自哪个根目录 —— 项目赢还是用户赢,要让用户看得出来。 */
@@ -148,6 +153,7 @@ export function parseAgentText(text: string, fallbackName: string, origin: strin
   const model = parsed.meta.get('model');
   const permission = parsed.meta.get('permission');
   const spawnsRaw = parsed.meta.get('spawns');
+  const outputRaw = parsed.meta.get('output');
 
   return {
     name,
@@ -155,6 +161,7 @@ export function parseAgentText(text: string, fallbackName: string, origin: strin
     systemPrompt: parsed.body,
     ...(toolsRaw !== undefined ? { tools: parseTools(toolsRaw) } : {}),
     ...(spawnsRaw !== undefined ? { spawns: parseTools(spawnsRaw) } : {}),
+    ...(outputRaw !== undefined ? { output: parseTools(outputRaw) } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(permission !== undefined ? { permission } : {}),
     path,
