@@ -492,3 +492,113 @@ test('没有 permissions 字段 → rules 为空,行为与 V1 一致', (t) => {
   if (!outcome.ok) return;
   assert.deepEqual(outcome.rules, []);
 });
+
+test('presets:选中那一队摊平成槽位表,extends 先铺底', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' }, deepseek: { apiKey: 'd' } },
+    presets: {
+      cheap: { scout: 'glm:glm-4.5-air', review: 'glm' },
+      strong: { extends: 'cheap', review: 'deepseek:deepseek-v4.1' },
+    },
+    preset: 'strong',
+  });
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.presetName, 'strong');
+  assert.deepEqual(outcome.presetSlots, {
+    scout: 'glm:glm-4.5-air',
+    review: 'deepseek:deepseek-v4.1',
+  });
+  assert.equal(outcome.presetWarning, undefined);
+});
+
+test('presets:没选 preset → 没有槽位表(不是空表)', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    presets: { cheap: { scout: 'glm' } },
+  });
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  // 关键区别:undefined 让角色那边说"这次跑没选 preset",空表会让它说
+  // "槽位在这一队里没有" —— 把用户往错的方向引。
+  assert.equal(outcome.presetSlots, undefined);
+  assert.equal(outcome.presetName, undefined);
+  assert.equal(outcome.presetWarning, undefined);
+});
+
+test('presets:环境变量 HCODE_PRESET 压过文件', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    presets: { cheap: { scout: 'glm:glm-4.5-air' }, strong: { scout: 'glm:glm-5.3' } },
+    preset: 'cheap',
+  });
+
+  const outcome = loadConfig({ cwd: noProject, home, env: { HCODE_PRESET: 'strong' } });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.presetName, 'strong');
+  assert.deepEqual(outcome.presetSlots, { scout: 'glm:glm-5.3' });
+});
+
+test('presets:选中的队接不上 → 警告 + 没有槽位表,不拦下会话', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    presets: { cheap: { scout: 'glm' } },
+    preset: 'stong',
+  });
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, true, '队名写错不该让整个会话起不来 —— 角色回退主对话即可');
+  if (!outcome.ok) return;
+  assert.equal(outcome.presetSlots, undefined);
+  assert.match(outcome.presetWarning ?? '', /stong/);
+  assert.match(outcome.presetWarning ?? '', /cheap/);
+});
+
+test('presets 结构写坏 → 直接报错,不静默当成"没配 presets"', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    presets: { cheap: { scout: 3 } },
+  } as never);
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.match(outcome.message, /preset/);
+  assert.match(outcome.message, /cheap/);
+});
+
+test('presets:项目级整队盖住用户级的同名队,而不是逐槽位混起来', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    presets: { cheap: { scout: 'glm:glm-4.5-air', review: 'glm' } },
+    preset: 'cheap',
+  });
+  const cwd = makeProjectDir(t, { presets: { cheap: { scout: 'glm:glm-5.3' } } });
+
+  const outcome = loadConfig({ cwd, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  // 混起来的话这里会同时有 scout 与 review —— 而项目作者没写过 review 槽位。
+  assert.deepEqual(outcome.presetSlots, { scout: 'glm:glm-5.3' });
+});
+
+test('没有 presets 字段 → 三个 preset 字段全缺席,行为与之前完全一致', (t) => {
+  const home = makeHome(t, { provider: 'glm', providers: { glm: { apiKey: 'k' } } });
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.presetName, undefined);
+  assert.equal(outcome.presetSlots, undefined);
+  assert.equal(outcome.presetWarning, undefined);
+});

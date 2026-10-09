@@ -10,6 +10,7 @@ import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
 import { createSkillTool } from '../tools/skill.js';
 import { agentModelWarnings, agentRoots, agentSpawnWarnings, discoverAgents, renderAgentRoster } from '../core/agents.js';
+import { applyPresets } from '../core/presets.js';
 import { loadConfig, skillRoots } from './config.js';
 import { loadInstructions, renderInstructionNote, renderInstructionsForModel } from './instructions.js';
 import { banner, platformRefusal } from './startup.js';
@@ -51,6 +52,11 @@ async function main(): Promise<number> {
       renderInstructionNote(instructions),
       // 只有一份配置文件时没有歧义,不必占地方。两份以上才说得上"改了哪份生效"。
       ...(outcome.files.length > 1 ? [`配置:${outcome.files.join('  →  ')}`] : []),
+      // 整队换模型是这一行显示出来的唯一东西:换 preset 之后最该一眼看到的就是
+      // "现在用的是哪一队",不然只会在账单上发现。接不上时不显示(上面 stderr 说了)。
+      ...(outcome.presetName !== undefined && outcome.presetSlots !== undefined
+        ? [`preset:${outcome.presetName}`]
+        : []),
     ]),
   );
 
@@ -64,10 +70,23 @@ async function main(): Promise<number> {
   }
 
   // 角色与 skill 同一待遇:目录不存在是正常,文件读不懂必须说。
-  const agents = await discoverAgents(agentRoots());
-  for (const problem of agents.problems()) {
+  const discovered = await discoverAgents(agentRoots());
+  for (const problem of discovered.problems()) {
     process.stderr.write(`角色文件读不出来 —— ${problem}\n`);
   }
+  // 选了 preset 却用不上(队名写错、extends 断了、环)—— 说清楚,然后角色一律回退
+  // 主对话的模型。不拦下整场会话:回退是定义好的行为,用户还能干活。
+  if (outcome.presetWarning !== undefined) {
+    process.stderr.write(`preset 用不上 —— ${outcome.presetWarning}\n`);
+  }
+  // 角色文件里的槽位引用(preset:scout)在启动时就换成这一队的具体模型,派发路径上
+  // 再也不会见到 preset —— 接不上的引用在这里回退主对话并说一声。
+  const appliedPresets = applyPresets(discovered, outcome.presetSlots);
+  for (const warning of appliedPresets.warnings) {
+    process.stderr.write(`preset 回退 —— ${warning}\n`);
+  }
+  const agents = appliedPresets.agents;
+
   // 角色指向了配不出密钥的那家:说在前面,而不是等派发失败才暴露。回退本身是
   // 刻意的(派发时回退主对话模型),但用户得知道发生了回退。
   for (const warning of agentModelWarnings(agents.list(), Object.keys(outcome.providers))) {
@@ -79,14 +98,18 @@ async function main(): Promise<number> {
 
   // 角色按名换模型:能换就换(缓存实例,同一家的角色共享一个连接层),换不出
   // (没配那家)就回退主对话。工厂只给 task —— 主对话永远只有一家。
+  // 缓存键要带上模型:同一家的两个模型是两个实例。只按 provider 名缓存的话,
+  // preset 里写 `glm:glm-4.5-air` 的角色会静默用上主对话那家的 `glm-5.3` ——
+  // 配置看着生效了、账单却是另一个模型,这种错最难查。
   const providerCache = new Map<string, Provider>();
-  const providerFor = (id: string): Provider | undefined => {
+  const providerFor = (id: string, model?: string): Provider | undefined => {
     const choice = outcome.providers[id];
     if (!choice) return undefined;
-    let instance = providerCache.get(id);
+    const key = model === undefined ? id : JSON.stringify([id, model]);
+    let instance = providerCache.get(key);
     if (!instance) {
-      instance = createProvider(choice);
-      providerCache.set(id, instance);
+      instance = createProvider(model === undefined ? choice : { ...choice, model });
+      providerCache.set(key, instance);
     }
     return instance;
   };

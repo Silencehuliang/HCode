@@ -33,7 +33,7 @@ export type TaskDeps = {
    * 不给(或返回 undefined)时,角色一律用主对话的 Provider —— 这也是
    * `model` 字段缺省、或指向配不出密钥那家时的回退行为。
    */
-  providerFor?: (id: string) => Provider | undefined;
+  providerFor?: (id: string, model?: string) => Provider | undefined;
   /** 缺省(不指定角色)时子 agent 手上的工具 —— 只读探查那几个。 */
   tools: Tool[];
   /** 缺省角色使用的系统提示。 */
@@ -158,9 +158,13 @@ export function resolveAgentRun(
   // 模型绑定:解析得出就换到那一家的实例;解析不出(缺省)保持主对话的;
   // 指向的家配不出实例(providerFor 返回 undefined)也保持 —— 回退而不是报错,
   // 启动时的 stderr 警告已经说过这件事了。
+  //
+  // `provider:模型` 里的模型要一起传下去(v2-12 才补上:此前只换了家,模型那半
+  // 被丢掉了 —— preset 里 `glm:glm-4.5-air` 与 `glm:glm-5.3` 这种"同一家两个档"
+  // 的用法正是靠它)。providerFor 缺省(单测里常见)时忽略模型,行为照旧。
   const binding = parseModelBinding(def.model);
   const provider =
-    (binding ? deps.providerFor?.(binding.providerId) : undefined) ?? deps.provider;
+    (binding ? deps.providerFor?.(binding.providerId, binding.model) : undefined) ?? deps.provider;
 
   return {
     system: def.systemPrompt,

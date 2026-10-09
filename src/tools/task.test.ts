@@ -477,12 +477,14 @@ test('model: "glm:glm-5.3" 解析出 provider + 模型覆盖', async () => {
   const glmSub = scripted({ text: 'glm 结论', toolCalls: [] });
 
   const agents = makeCatalog(agentDef({ name: 'fast', model: 'glm:glm-5.3' }));
+  const seen: { id: string; model: string | undefined }[] = [];
   const task = createTaskTool({
     provider: glmSub.provider,
-    // 工厂拿到 id 后已无从知道模型覆盖 —— 覆盖属于构造实例那一步(config 已按
-    // 家解析好 model),这里测的是 providerFor 收到了 'glm'。
-    providerFor: (id) => {
-      assert.equal(id, 'glm');
+    // 模型覆盖要一路交到工厂手里 —— 只传 id 的话,"同一家两个档"(preset 里
+    // `glm:glm-4.5-air` 与 `glm:glm-5.3` 各占一个槽位)会静默用成同一个模型,
+    // 配置看着生效了、账单却是另一个档。
+    providerFor: (id, model) => {
+      seen.push({ id, model });
       return glmSub.provider;
     },
     tools: [],
@@ -492,6 +494,26 @@ test('model: "glm:glm-5.3" 解析出 provider + 模型覆盖', async () => {
 
   await task.run({ agent: 'fast', description: 'd', prompt: 'p' });
   assert.equal(glmSub.requests.length, 1);
+  assert.deepEqual(seen, [{ id: 'glm', model: 'glm-5.3' }]);
+});
+
+test('model 里模型名自带冒号时,整段都是模型名', async () => {
+  const sub = scripted({ text: '结论', toolCalls: [] });
+  const agents = makeCatalog(agentDef({ name: 'air', model: 'glm:glm-4.5:air' }));
+  const seen: { id: string; model: string | undefined }[] = [];
+  const task = createTaskTool({
+    provider: sub.provider,
+    providerFor: (id, model) => {
+      seen.push({ id, model });
+      return sub.provider;
+    },
+    tools: [],
+    system: 'x',
+    agents,
+  });
+
+  await task.run({ agent: 'air', description: 'd', prompt: 'p' });
+  assert.deepEqual(seen, [{ id: 'glm', model: 'glm-4.5:air' }]);
 });
 
 test('角色引用配不出实例的 provider → 回退主对话,不报错', async () => {

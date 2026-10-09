@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ProviderChoice } from '../provider/index.js';
 import { parsePermissionRules, type PermissionRules } from '../core/permission.js';
+import { activeSlots, parsePresets, type PresetEntry, type PresetSlots } from '../core/presets.js';
 import { CLAUDE_DEFAULT_BASE_URL } from '../provider/claude.js';
 import { DEEPSEEK_DEFAULT_BASE_URL } from '../provider/deepseek.js';
 import { GLM_DEFAULT_BASE_URL } from '../provider/glm.js';
@@ -30,6 +31,13 @@ type SettingsFile = {
   providers?: Record<string, ProviderSettings>;
   /** 用户层的工具权限规则:工具名(支持 `*` 通配)→ allow / ask / deny,键序即优先级。 */
   permissions?: Record<string, string>;
+  /**
+   * 队伍定义:队伍名 → (槽位名 → `provider[:模型]`),key 为 `extends` 时继承另一队。
+   * 角色文件里写 `model: preset:槽位名` 来引它。见 core/presets.ts。
+   */
+  presets?: Record<string, unknown>;
+  /** 这一次跑用哪一队。不写 = 角色里的槽位引用一律回退主对话的模型。 */
+  preset?: string;
 };
 
 export type Session = {
@@ -63,6 +71,16 @@ export type ConfigOutcome =
        * 行为与 V1 完全一致。
        */
       rules: PermissionRules;
+      /** 选中的队伍名。没选时 undefined。 */
+      presetName?: string;
+      /**
+       * 选中的那一队摊平后的槽位表。没选 preset、或选的那个接不上时是
+       * **undefined**(而不是空对象)—— 两者在角色那边是两种回退文案:"没选 preset"
+       * 与"槽位在这一队里没有"。空对象会让后者冒充前者,把用户往错的方向引。
+       */
+      presetSlots?: PresetSlots;
+      /** 选了 preset 却用不上时的一句话,由调用方显示。 */
+      presetWarning?: string;
     }
   | { ok: false; message: string };
 
@@ -425,11 +443,47 @@ ${parsed.error}` };
     ...(thinking !== undefined ? { thinking } : {}),
   };
 
+  // 队伍也按层合并,但**整队替换**而不是逐槽位铺:槽位是照着 extends 的意义写的,
+  // 把两层的槽位混起来,继承链会指向一个原作者没想过的组合。
+  const presets: Record<string, PresetEntry> = {};
+  for (const layer of layers) {
+    const parsed = parsePresets(layer.settings.presets);
+    // 结构写坏直接报错。降级成"没有 presets"的话,用户会以为队伍生效了,而其实
+    // 每个角色都在用主对话的模型 —— 还查不出为什么。
+    if ('error' in parsed) {
+      return { ok: false, message: `preset 有问题:
+
+${parsed.error}` };
+    }
+    for (const [name, entry] of Object.entries(parsed.presets)) {
+      if (presets[name] !== undefined) continue;
+      presets[name] = entry;
+    }
+  }
+
+  // 与 provider 同一套优先级:环境变量 > 项目级 > 用户级。
+  const presetName =
+    firstEnv(env, ['HCODE_PRESET']) ?? layers.find((layer) => layer.settings.preset)?.settings.preset;
+
+  let presetSlots: PresetSlots | undefined;
+  let presetWarning: string | undefined;
+  if (presetName !== undefined && presetName.trim() !== '') {
+    const resolved = activeSlots(presets, presetName);
+    if ('error' in resolved) {
+      presetWarning = resolved.error;
+    } else {
+      presetSlots = resolved.slots;
+    }
+  }
+
   return {
     ok: true,
     files,
     rules,
     providers,
+    ...(presetName !== undefined && presetName.trim() !== '' ? { presetName } : {}),
+    ...(presetSlots !== undefined ? { presetSlots } : {}),
+    ...(presetWarning !== undefined ? { presetWarning } : {}),
     session: {
       providerId: chosen,
       model,

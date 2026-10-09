@@ -105,6 +105,59 @@ hcode 会在启动时检查,直接告诉你**是第几个字符**出了问题,�
 | 你(settings.json) | 天花板。可以放宽默认(比如让 `write_file` 免问),也可以收紧(比如把 `run_command` 整个禁掉)。没写的工具听默认。 |
 | 角色文件 | 只能比天花板**更严**。角色声明 `permission: read-only` 时,即便你允许了 `write_file`,这个角色也拿不到写盘工具。 |
 
+## 角色整队换模型(presets)
+
+角色文件里能不能写死"用哪家的哪个模型"?能(`model: deepseek:deepseek-v4.1`),但"哪家便宜"这件事会变:换了套餐、换了网关、试了另一家,写死在角色文件里就得把每个角色改一遍。
+
+所以分成两层:**角色文件写用途,配置文件写这次跑用谁。**
+
+角色文件里引用一个**槽位**:
+
+```markdown
+---
+name: explorer
+description: 只读探查代码库,回答"这个东西在哪、怎么用"
+model: preset:scout
+permission: read-only
+---
+```
+
+`presets` 在 `settings.json` 里定义槽位,`preset` 选出这次跑用哪一队:
+
+```json
+{
+  "presets": {
+    "cheap": {
+      "scout": "glm:glm-4.5-air",
+      "review": "glm"
+    },
+    "strong": {
+      "extends": "cheap",
+      "review": "deepseek:deepseek-v4.1"
+    }
+  },
+  "preset": "cheap"
+}
+```
+
+- 槽位的值是 `provider` 或 `provider:模型` —— 与角色 `model` 字段同一套写法。**同一家可以有两个档**:`glm:glm-4.5-air` 与 `glm:glm-5.3` 是两个模型,不是一个。
+- `extends` 先铺另一队,自己的槽位盖住继承来的。可以连着继承(三层也行)。
+- 整队切换:`"preset": "strong"`,或者这一次跑 `HCODE_PRESET=strong hcode`(环境变量压过文件)。**角色文件一个字不用改。**
+- 当前用的哪一队写在启动横幅上(`preset:cheap`)。
+- 项目级 `.hcode/settings.json` 里的同名队**整队**盖住用户级那一份 —— 不是逐槽位混起来,否则继承链会指向一个原作者没想过的组合。
+
+接不上的时候一律**回退主对话的模型并说一声**,不静默、也不拦下整场会话:
+
+| 情况 | 结果 |
+| --- | --- |
+| 角色写了 `preset:scout`,但没选 `preset` | 启动时 stderr 提示"这次跑没选 preset",该角色用主对话的模型 |
+| 选中的队里没有 `scout` 这个槽位 | 同上,并列出这一队有哪些槽位 |
+| `"preset": "stong"`(队名写错) | 启动时 stderr 列出配置里实际有哪些队,所有槽位引用一并回退 |
+| `extends` 指向不存在的队、或绕成环 | 同上(环会把链条整条打出来) |
+| `presets` 结构写坏(比如槽位值不是字符串) | **直接报错**,不让 hcode 起来 —— 否则你会以为队伍生效了,其实每个角色都在用主对话的模型 |
+
+不配 `presets` 时行为与之前完全一致:角色 `model` 照旧可以直接写 `provider[:模型]`。
+
 ## 环境变量
 
 通用变量,谁都用:
