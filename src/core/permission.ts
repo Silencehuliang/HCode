@@ -82,8 +82,26 @@ export const DANGER_RULES: DangerRule[] = [
   },
 ];
 
-/** 只读工具白名单。不在这个名单里的一律要问 —— 默认放行等于每加一个工具就悄悄开个口子。 */
-const READ_ONLY = new Set(['read_file', 'search_content', 'find_files']);
+/**
+ * 零爆炸半径的工具,不问就执行。
+ *
+ * 判据不是"读不读文件",是"最坏能坏到哪":读文件的工具最多读错东西;todo 三件套只动
+ * 会话内存里的清单;task 派出去的子 agent 拿什么工具由装配处决定(main.ts 里只给只读
+ * 那几个);skill 读的是本地 Markdown 正文。哪一个都碰不到用户磁盘上的一字节。
+ *
+ * 不在这个名单里的一律要问 —— 默认放行等于每加一个工具就悄悄开个口子。新工具进来时
+ * 必须在这里做出裁决,写进对应测试。
+ */
+const NO_BLAST_RADIUS = new Set([
+  'read_file',
+  'search_content',
+  'find_files',
+  'todo_write',
+  'todo_update',
+  'todo_read',
+  'task',
+  'skill',
+]);
 
 function commandOf(input: unknown): string {
   const { command } = (input ?? {}) as { command?: unknown };
@@ -95,7 +113,7 @@ function commandOf(input: unknown): string {
  * 同样的输入永远给同样的判定。
  */
 export function decide(request: PermissionRequest): Verdict {
-  if (READ_ONLY.has(request.tool)) return { kind: 'allow' };
+  if (NO_BLAST_RADIUS.has(request.tool)) return { kind: 'allow' };
 
   if (request.tool === 'run_command') {
     const command = commandOf(request.input);

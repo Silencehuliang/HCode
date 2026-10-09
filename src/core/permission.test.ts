@@ -9,7 +9,7 @@ function call(tool: string, input: unknown = {}): { tool: string; input: unknown
   return { tool, input };
 }
 
-// —— 纯规则:只读放行 / 写文件问 / 命令按显式危险清单拦截 ——
+// —— 纯规则:零爆炸半径放行 / 写文件问 / 命令按显式危险清单拦截 ——
 
 for (const tool of ['read_file', 'search_content', 'find_files']) {
   test(`只读工具 ${tool} 直接放行,不打扰用户`, () => {
@@ -19,6 +19,21 @@ for (const tool of ['read_file', 'search_content', 'find_files']) {
       verdict.kind,
       'allow',
       `只读操作弹窗问一次,用户就会学会闭着眼按回车 —— 那比不问更糟。实际:${JSON.stringify(verdict)}`,
+    );
+  });
+}
+
+// 实测抓到过的缺陷:todo 只动会话内存里的清单、task 派的子 agent 拿的是只读工具、
+// skill 读的是本地 Markdown 正文 —— 全都碰不到用户磁盘上的一字节,却落进了"一律要问"
+// 的兜底分支。给这类零爆炸半径的工具逐次弹窗,训练出来的就是闭眼按回车。
+for (const tool of ['todo_write', 'todo_update', 'todo_read', 'task', 'skill']) {
+  test(`零爆炸半径工具 ${tool} 直接放行,不打扰用户`, () => {
+    const verdict = decide(call(tool, {}));
+
+    assert.equal(
+      verdict.kind,
+      'allow',
+      `todo/task/skill 最坏也碰不到用户的一个字节,弹窗问只会把用户训练成盲按回车。实际:${JSON.stringify(verdict)}`,
     );
   });
 }

@@ -123,7 +123,7 @@ Commands run in a fresh process each time, with an explicit working directory, a
 
 ## Permissions
 
-Read-only tools (`read_file`, `search_content`, `find_files`) run without asking. Anything that writes, executes, or changes state asks first. A built-in list of destructive patterns — recursive deletes, `git push --force`, `git reset --hard`, disk formatting, execution-policy changes, `iex` of a downloaded script — is refused outright, and each refusal says what to do instead rather than leaving the model to retry with a different spelling.
+Tools with zero blast radius run without asking: the readers (`read_file`, `search_content`, `find_files`), the todo list (`todo_*` — it only touches an in-session list), `task` (the sub-agent it spawns only gets read-only tools), and `skill` (it reads local Markdown). At worst these read the wrong thing; none of them can touch a byte on your disk. Writing and editing files asks first. PowerShell commands run by default and are only stopped by a built-in list of destructive patterns — recursive deletes, `git push --force`, `git reset --hard`, disk formatting, execution-policy changes, `iex` of a downloaded script — and each refusal says what to do instead rather than leaving the model to retry with a different spelling. Why not confirm every command: a prompt you blindly approve every time is more dangerous than no prompt at all.
 
 ## Project instructions
 
