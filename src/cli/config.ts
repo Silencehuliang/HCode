@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { ProviderChoice } from '../provider/index.js';
 import { CLAUDE_DEFAULT_BASE_URL } from '../provider/claude.js';
 import { DEEPSEEK_DEFAULT_BASE_URL } from '../provider/deepseek.js';
 import { GLM_DEFAULT_BASE_URL } from '../provider/glm.js';
@@ -47,6 +48,13 @@ export type ConfigOutcome =
        * 一个都不存在时是空数组 —— 全靠环境变量跑起来是正常情况,不是异常。
        */
       files: string[];
+      /**
+       * 每一家**配得出密钥**的 Provider,已按同一套环境变量规则解析成可直接
+       * 构造的形状。角色按名换模型(v2-03)从这里取材;选中的那家与 session
+       * 字段一致。凑不出密钥的家不出现 —— 出现一个构造不出来的条目,只会把
+       * "回退主对话"这个动作变成一次运行时报错。
+       */
+      providers: Record<string, ProviderChoice>;
     }
   | { ok: false; message: string };
 
@@ -359,9 +367,42 @@ export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
     };
   }
 
+  // 每一家都按与选中那家相同的规则解析(通用的 HCODE_* 只作用于选中的那家 ——
+  // 它们说的是"这一次跑用哪家",不是"这一家永远用什么")。凑不出密钥的跳过。
+  const providers: Record<string, ProviderChoice> = {};
+  for (const id of KNOWN_PROVIDERS) {
+    const entry = entries[id] ?? {};
+    const key = apiKeyFor(id, entry, env);
+    if (!key) continue;
+    const m = firstEnv(env, PROVIDER_ENV[id]?.model ?? []) ?? entry.model ?? DEFAULT_MODELS[id] ?? 'unknown';
+    const bu = firstEnv(env, PROVIDER_ENV[id]?.baseUrl ?? []) ?? entry.baseUrl;
+    const px = entry.proxy;
+    const th = entry.thinking;
+    providers[id] = {
+      providerId: id,
+      model: m,
+      apiKey: key,
+      ...(bu ? { baseUrl: bu } : {}),
+      ...(px ? { proxy: px } : {}),
+      ...(th !== undefined ? { thinking: th } : {}),
+    };
+  }
+
+  // 选中的那家以 session 的解析结果为准 —— 它多吃了一层通用 HCODE_* 覆盖,
+  // 直接用循环里的那份会出现"主对话一个模型、角色引用同名家却是另一个模型"。
+  providers[chosen] = {
+    providerId: chosen,
+    model,
+    apiKey,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(proxy ? { proxy } : {}),
+    ...(thinking !== undefined ? { thinking } : {}),
+  };
+
   return {
     ok: true,
     files,
+    providers,
     session: {
       providerId: chosen,
       model,

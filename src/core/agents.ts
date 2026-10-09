@@ -29,6 +29,50 @@ export type AgentDef = {
   origin: string;
 };
 
+/** 角色的 model 字段解析结果:指向哪一家、要不要覆盖模型名。 */
+export type ModelBinding = {
+  providerId: string;
+  model?: string;
+};
+
+/**
+ * 解析角色 frontmatter 的 model 值:`deepseek` 或 `glm:glm-5.3`。
+ *
+ * 只按**第一个**冒号切 —— 有的模型名自己带冒号(如 `glm-4.5:air`),后半段
+ * 整体都是模型名。冒号后为空视为没写覆盖。空串/全空白返回 undefined(= 继承
+ * 主对话),这是"没写"而不是"写错了"。
+ */
+export function parseModelBinding(raw: string | undefined): ModelBinding | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === '') return undefined;
+
+  const colon = trimmed.indexOf(':');
+  if (colon < 0) return { providerId: trimmed };
+  const providerId = trimmed.slice(0, colon).trim();
+  const model = trimmed.slice(colon + 1).trim();
+  if (providerId === '') return undefined;
+  return model === '' ? { providerId } : { providerId, model };
+}
+
+/**
+ * 启动时的角色绑定体检:哪些角色的 model 指向了配不出实例的家。
+ *
+ * 返回警告文案(空数组 = 全部健康),显示与否归调用方 —— core 不碰 stderr。
+ */
+export function agentModelWarnings(agents: AgentDef[], availableProviderIds: readonly string[]): string[] {
+  const warnings: string[] = [];
+  for (const def of agents) {
+    const binding = parseModelBinding(def.model);
+    if (!binding) continue;
+    if (availableProviderIds.includes(binding.providerId)) continue;
+    warnings.push(
+      `角色 ${def.name} 的 model 指向 ${binding.providerId},但配置里凑不出这一家的密钥 —— 派发它时会回退主对话的模型。`,
+    );
+  }
+  return warnings;
+}
+
 export type AgentCatalog = {
   list(): AgentDef[];
   get(name: string): AgentDef | undefined;

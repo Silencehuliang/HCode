@@ -55,16 +55,22 @@ test('从用户级 settings.json 读出选中的 Provider', (t) => {
 
   const outcome = loadConfig({ cwd: noProject, home, env: {} });
 
-  assert.deepEqual(outcome, {
-    ok: true,
-    files: [settingsPath(home)],
-    session: {
-      providerId: 'glm',
-      model: 'glm-5.3',
-      apiKey: 'key-1',
-      baseUrl: 'http://127.0.0.1:7863/v1',
-    },
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.session, {
+    providerId: 'glm',
+    model: 'glm-5.3',
+    apiKey: 'key-1',
+    baseUrl: 'http://127.0.0.1:7863/v1',
   });
+  // v2-03:配得出密钥的每一家都要在 providers 里,选中那家与 session 一致。
+  assert.deepEqual(outcome.providers.glm, {
+    providerId: 'glm',
+    model: 'glm-5.3',
+    apiKey: 'key-1',
+    baseUrl: 'http://127.0.0.1:7863/v1',
+  });
+  assert.equal(outcome.providers.deepseek, undefined);
 });
 
 test('环境变量覆盖配置文件 —— 文件先读,环境后读', (t) => {
@@ -83,15 +89,13 @@ test('环境变量覆盖配置文件 —— 文件先读,环境后读', (t) => {
     },
   });
 
-  assert.deepEqual(outcome, {
-    ok: true,
-    files: [settingsPath(home)],
-    session: {
-      providerId: 'glm',
-      model: 'glm-5.3-flash',
-      apiKey: 'env-key',
-      baseUrl: 'http://127.0.0.1:9999/v1',
-    },
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.session, {
+    providerId: 'glm',
+    model: 'glm-5.3-flash',
+    apiKey: 'env-key',
+    baseUrl: 'http://127.0.0.1:9999/v1',
   });
 });
 

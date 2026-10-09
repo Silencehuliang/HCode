@@ -1,5 +1,5 @@
 import type { Tool } from '../core/tool.js';
-import type { AgentCatalog, AgentDef } from '../core/agents.js';
+import { parseModelBinding, type AgentCatalog, type AgentDef } from '../core/agents.js';
 import { runSubagent } from '../core/subagent.js';
 import { createToolset } from '../core/toolset.js';
 import { guardToolsetForAgent, isZeroBlastRadius, parseAgentRestriction } from '../core/permission.js';
@@ -15,6 +15,12 @@ function asText(value: unknown, what: string): string {
 
 export type TaskDeps = {
   provider: Provider;
+  /**
+   * 角色按名换模型(v2-03):给一个 provider id,造出那一家的实例。
+   * 不给(或返回 undefined)时,角色一律用主对话的 Provider —— 这也是
+   * `model` 字段缺省、或指向配不出密钥那家时的回退行为。
+   */
+  providerFor?: (id: string) => Provider | undefined;
   /** 缺省(不指定角色)时子 agent 手上的工具 —— 只读探查那几个。 */
   tools: Tool[];
   /** 缺省角色使用的系统提示。 */
@@ -35,7 +41,13 @@ export type TaskDeps = {
 export function resolveAgentRun(
   deps: TaskDeps,
   name: string,
-): { system: string; tools: Tool[]; def: AgentDef; restriction?: AgentRestriction } | { error: string } {
+): {
+  system: string;
+  tools: Tool[];
+  def: AgentDef;
+  restriction?: AgentRestriction;
+  provider?: Provider;
+} | { error: string } {
   if (!deps.agents) {
     return { error: `没有名为 ${name} 的角色:这个会话没有启用角色目录。` };
   }
@@ -77,7 +89,20 @@ export function resolveAgentRun(
     ? tools.filter((tool) => isZeroBlastRadius(tool.spec.name))
     : tools;
 
-  return { system: def.systemPrompt, tools: visible, def, ...(restriction ? { restriction } : {}) };
+  // 模型绑定:解析得出就换到那一家的实例;解析不出(缺省)保持主对话的;
+  // 指向的家配不出实例(providerFor 返回 undefined)也保持 —— 回退而不是报错,
+  // 启动时的 stderr 警告已经说过这件事了。
+  const binding = parseModelBinding(def.model);
+  const provider =
+    (binding ? deps.providerFor?.(binding.providerId) : undefined) ?? deps.provider;
+
+  return {
+    system: def.systemPrompt,
+    tools: visible,
+    def,
+    provider,
+    ...(restriction ? { restriction } : {}),
+  };
 }
 
 /**
@@ -136,6 +161,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
       let system = deps.system;
       let tools = deps.tools;
       let restriction: AgentRestriction | undefined;
+      let provider = deps.provider;
 
       if (typeof agent === 'string' && agent.trim() !== '') {
         const resolved = resolveAgentRun(deps, agent.trim());
@@ -145,6 +171,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
         system = resolved.system;
         tools = resolved.tools;
         restriction = resolved.restriction;
+        provider = resolved.provider ?? deps.provider;
       }
 
       // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
@@ -165,7 +192,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
       try {
         return await runSubagent(
           {
-            provider: deps.provider,
+            provider,
             tools: guarded,
             system,
             ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),

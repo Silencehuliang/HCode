@@ -450,3 +450,80 @@ test('没有 approve 通道时(单测环境),ask 默认拒绝 —— 不误放�
   // 不会是"没写"的结论)。这里只要不误放行就够了 —— 上面那条测试已钉住 approve 路径。
   assert.ok(true);
 });
+
+// ---------- v2-03:角色按名换模型 ----------
+
+test('model: "deepseek" 的角色跑在 DeepSeek 实例上', async () => {
+  const subA = scripted({ text: '结论', toolCalls: [] }); // 主对话不会跑,占位
+  const deepseekSub = scripted({ text: '深结论', toolCalls: [] });
+
+  const agents = makeCatalog(agentDef({ name: 'reviewer', model: 'deepseek' }));
+  const task = createTaskTool({
+    provider: subA.provider,
+    providerFor: (id) => (id === 'deepseek' ? deepseekSub.provider : undefined),
+    tools: [],
+    system: 'x',
+    agents,
+  });
+
+  const output = (await task.run({ agent: 'reviewer', description: 'd', prompt: 'p' })) as string;
+  assert.equal(output, '深结论');
+  assert.equal(deepseekSub.requests.length, 1, '子 agent 必须跑在换过去的 Provider 上');
+  assert.equal(subA.requests.length, 0, '主对话的 Provider 一个请求都不该发');
+});
+
+test('model: "glm:glm-5.3" 解析出 provider + 模型覆盖', async () => {
+  const glmSub = scripted({ text: 'glm 结论', toolCalls: [] });
+
+  const agents = makeCatalog(agentDef({ name: 'fast', model: 'glm:glm-5.3' }));
+  const task = createTaskTool({
+    provider: glmSub.provider,
+    // 工厂拿到 id 后已无从知道模型覆盖 —— 覆盖属于构造实例那一步(config 已按
+    // 家解析好 model),这里测的是 providerFor 收到了 'glm'。
+    providerFor: (id) => {
+      assert.equal(id, 'glm');
+      return glmSub.provider;
+    },
+    tools: [],
+    system: 'x',
+    agents,
+  });
+
+  await task.run({ agent: 'fast', description: 'd', prompt: 'p' });
+  assert.equal(glmSub.requests.length, 1);
+});
+
+test('角色引用配不出实例的 provider → 回退主对话,不报错', async () => {
+  const main = scripted({ text: '主对话结论', toolCalls: [] });
+
+  const agents = makeCatalog(agentDef({ name: 'orphan', model: 'claude' }));
+  const task = createTaskTool({
+    provider: main.provider,
+    providerFor: () => undefined, // 没配 claude
+    tools: [],
+    system: 'x',
+    agents,
+  });
+
+  const output = (await task.run({ agent: 'orphan', description: 'd', prompt: 'p' })) as string;
+  assert.equal(output, '主对话结论');
+  assert.equal(main.requests.length, 1);
+});
+
+test('不写 model → 与主对话同 Provider(缺省继承)', async () => {
+  const main = scripted({ text: '继承结论', toolCalls: [] });
+  let factoryCalled = 0;
+
+  const agents = makeCatalog(agentDef({ name: 'plain' }));
+  const task = createTaskTool({
+    provider: main.provider,
+    providerFor: () => { factoryCalled += 1; return main.provider; },
+    tools: [],
+    system: 'x',
+    agents,
+  });
+
+  const output = (await task.run({ agent: 'plain', description: 'd', prompt: 'p' })) as string;
+  assert.equal(output, '继承结论');
+  assert.equal(factoryCalled, 0, '没有 model 字段就不该去查工厂');
+});

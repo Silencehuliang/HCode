@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { SUBAGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../core/system-prompt.js';
 import { createProvider } from '../provider/index.js';
+import type { Provider } from '../provider/types.js';
 import { createTools, createExplorerTools } from '../tools/index.js';
 import { createTaskTool } from '../tools/task.js';
 import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
 import { createSkillTool } from '../tools/skill.js';
-import { agentRoots, discoverAgents } from '../core/agents.js';
+import { agentModelWarnings, agentRoots, discoverAgents } from '../core/agents.js';
 import { loadConfig, skillRoots } from './config.js';
 import { loadInstructions, renderInstructionNote, renderInstructionsForModel } from './instructions.js';
 import { banner, platformRefusal } from './startup.js';
@@ -66,6 +67,25 @@ async function main(): Promise<number> {
   for (const problem of agents.problems()) {
     process.stderr.write(`角色文件读不出来 —— ${problem}\n`);
   }
+  // 角色指向了配不出密钥的那家:说在前面,而不是等派发失败才暴露。回退本身是
+  // 刻意的(派发时回退主对话模型),但用户得知道发生了回退。
+  for (const warning of agentModelWarnings(agents.list(), Object.keys(outcome.providers))) {
+    process.stderr.write(`角色模型回退 —— ${warning}\n`);
+  }
+
+  // 角色按名换模型:能换就换(缓存实例,同一家的角色共享一个连接层),换不出
+  // (没配那家)就回退主对话。工厂只给 task —— 主对话永远只有一家。
+  const providerCache = new Map<string, Provider>();
+  const providerFor = (id: string): Provider | undefined => {
+    const choice = outcome.providers[id];
+    if (!choice) return undefined;
+    let instance = providerCache.get(id);
+    if (!instance) {
+      instance = createProvider(choice);
+      providerCache.set(id, instance);
+    }
+    return instance;
+  };
 
   // task 不传 agent 参数时的缺省行为:派只读探查者(V1 行为,向后兼容)。
   // 主对话全量工具传给 task 作白名单取材范围;白名单缺省(角色没写 tools)
@@ -73,6 +93,7 @@ async function main(): Promise<number> {
   const mainTools = [...createTools({ todos }), createSkillTool(skills)];
   const task = createTaskTool({
     provider,
+    providerFor,
     tools: createExplorerTools(),
     system: SUBAGENT_SYSTEM_PROMPT,
     maxTurns: SUBAGENT_MAX_TURNS,

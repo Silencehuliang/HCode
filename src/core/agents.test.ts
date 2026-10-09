@@ -184,3 +184,32 @@ test('frontmatter 里 name 与文件名不同 → name 优先', async () => {
     await cleanup();
   }
 });
+
+// ---------- v2-03:model 字段绑定 ----------
+
+import { agentModelWarnings, parseModelBinding } from './agents.js';
+
+test('parseModelBinding:只指家 / 家:模型 / 空 = 继承', () => {
+  assert.deepEqual(parseModelBinding('deepseek'), { providerId: 'deepseek' });
+  assert.deepEqual(parseModelBinding('glm:glm-5.3'), { providerId: 'glm', model: 'glm-5.3' });
+  assert.deepEqual(parseModelBinding(' glm : glm-5.3 '), { providerId: 'glm', model: 'glm-5.3' });
+  // 模型名自己带冒号:只按第一个冒号切,后半段整体是模型名。
+  assert.deepEqual(parseModelBinding('glm:glm-4.5:air'), { providerId: 'glm', model: 'glm-4.5:air' });
+  assert.deepEqual(parseModelBinding(':model-only'), undefined);
+  assert.deepEqual(parseModelBinding('glm:'), { providerId: 'glm' }); // 冒号后空 = 只指家
+  assert.equal(parseModelBinding(undefined), undefined);
+  assert.equal(parseModelBinding('  '), undefined);
+});
+
+test('agentModelWarnings:指向配不出密钥的家才警告', () => {
+  const defs = [
+    { name: 'a', description: 'd', systemPrompt: 's', path: 'p', origin: 'o', model: 'deepseek' },
+    { name: 'b', description: 'd', systemPrompt: 's', path: 'p', origin: 'o', model: 'qwen:qwen-max' },
+    { name: 'c', description: 'd', systemPrompt: 's', path: 'p', origin: 'o' },
+  ];
+  const warnings = agentModelWarnings(defs, ['glm', 'deepseek']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /角色 b/);
+  assert.match(warnings[0]!, /qwen/);
+  assert.match(warnings[0]!, /回退/);
+});
