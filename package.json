@@ -1,6 +1,6 @@
 {
   "name": "hcode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "开源的 AI 编程 Harness —— 面向使用国产模型的开发者,Windows 优先 / An open-source AI coding harness for Chinese developers",
   "license": "Apache-2.0",
   "author": "Silencehuliang",
