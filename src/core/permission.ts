@@ -240,6 +240,11 @@ const NO_BLAST_RADIUS = new Set([
   'todo_read',
   'task',
   'skill',
+  // v2-11 的两件:task_status 读的是会话内存里的任务表,task_followup 让已经
+  // 派出去的子任务接着说话(它自己那趟工具的权限门还在,一层不少)。两个都碰
+  // 不到用户磁盘上的一字节 —— 和 task 一个道理。
+  'task_status',
+  'task_followup',
 ]);
 
 /** 一个工具是否零爆炸半径。给装配处用 —— 只读角色在装配时就该看不到写工具。 */
@@ -308,6 +313,14 @@ export function guardToolsetForAgent(
     approve: (request: PermissionRequest) => Promise<boolean>;
     restriction?: AgentRestriction;
     rules?: PermissionRules;
+    /**
+     * 被拒时回给模型的文案(v2-11)。
+     *
+     * 缺省那句说的是"用户没有批准"—— 对前台派发是对的。但**后台任务根本没有
+     * 确认通道**,照搬那句话会把责任推给一个从没被问过的人,模型还会以为"再问
+     * 一次也许就批了"。所以后台派发在这里换一句如实的话。
+     */
+    unapprovedNote?: string;
   },
 ): Toolset {
   return {
@@ -333,7 +346,10 @@ export function guardToolsetForAgent(
 
       const approved = await deps.approve(request);
       if (!approved) {
-        return `用户没有批准这次 ${call.name} 操作,**没有执行**。先问清楚他想要什么,再换一个方式。`;
+        return (
+          deps.unapprovedNote ??
+          `用户没有批准这次 ${call.name} 操作,**没有执行**。先问清楚他想要什么,再换一个方式。`
+        );
       }
 
       return inner.run(call, { ...(context ?? {}), approve: deps.approve });

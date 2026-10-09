@@ -2,6 +2,7 @@ import { runTurn, type LoopEvent } from './loop.js';
 import { estimateMessageTokens } from './tokens.js';
 import type { Provider } from '../provider/types.js';
 import type { Toolset } from './toolset.js';
+import type { Message } from '../provider/types.js';
 
 /**
  * 一次子任务的结果。
@@ -13,6 +14,14 @@ import type { Toolset } from './toolset.js';
 export type SubagentResult = {
   text: string;
   tokens: number;
+  /**
+   * 这一趟结束时的完整消息数组(v2-11)。
+   *
+   * 交出来是为了 **followup**:补一句"再确认一下 X"要能接着原消息数组往下跑,
+   * 而不是新开一个 agent 把前面查过的东西再查一遍 —— 那样既费钱又可能得到矛盾
+   * 的结论。调用方(任务表)负责收着它。
+   */
+  messages: Message[];
 };
 
 export type SubagentDeps = {
@@ -57,6 +66,27 @@ export async function runSubagent(
   prompt: string,
   signal?: AbortSignal,
 ): Promise<SubagentResult> {
+  return continueSubagent(deps, [], prompt, signal);
+}
+
+/**
+ * 在一个**已经有历史**的消息数组上接着跑(v2-11:followup)。
+ *
+ * 与 runSubagent 的差别只有一条:起点不是空的,而是上一趟结束时那个数组。所以
+ * "冷启动"与"续跑"是同一个函数的两种入参,不是两套实现 —— 续跑唯一多做对的事
+ * 就是**没有**把历史丢掉。
+ *
+ * 装配是**新的一遍**:角色文件如果在这期间被改过,续跑用的是新版本。这是有意的
+ * —— 文件是唯一事实来源,而且追随旧装配会让"我明明改了提示"变成一个查不出来的
+ * 怪现象。它换来的代价是:改角色文件后,续跑的任务可能换了工具集,别把它当同一
+ * 个 agent 的延续去指望。
+ */
+export async function continueSubagent(
+  deps: SubagentDeps,
+  messages: Message[],
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<SubagentResult> {
   // 显式拼,不用展开 —— deps.onEvent 是可选的,展开后类型带上 undefined,
   // 与 LoopDeps 的必填签名对不上(exactOptionalPropertyTypes)。
   const result = await runTurn(
@@ -68,11 +98,12 @@ export async function runSubagent(
       ...(deps.onEvent !== undefined ? { onEvent: deps.onEvent } : {}),
       ...(signal ? { signal } : {}),
     },
-    [{ role: 'user', text: prompt }],
+    [...messages, { role: 'user', text: prompt }],
   );
 
   return {
     text: result.text === null ? TURN_LIMIT_NOTE : result.text,
     tokens: estimateMessageTokens(result.messages),
+    messages: result.messages,
   };
 }

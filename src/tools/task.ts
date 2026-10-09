@@ -1,17 +1,18 @@
-import type { Tool, ToolContext } from '../core/tool.js';
+import type { SubagentDoneEvent, Tool, ToolContext } from '../core/tool.js';
 import type { LoopEvent } from '../core/loop.js';
 import { parseModelBinding, type AgentCatalog, type AgentDef } from '../core/agents.js';
-import { runSubagent } from '../core/subagent.js';
+import { continueSubagent } from '../core/subagent.js';
+import { createTaskRegistry, renderTaskLine, type TaskRegistry } from '../core/task-registry.js';
 import {
   checkOutput,
   contractFailure,
   contractInstruction,
   retryInstruction,
 } from '../core/output-contract.js';
-import { createToolset } from '../core/toolset.js';
+import { createToolset, type Toolset } from '../core/toolset.js';
 import { guardToolsetForAgent, isZeroBlastRadius, parseAgentRestriction } from '../core/permission.js';
 import type { AgentRestriction } from '../core/permission.js';
-import type { Provider } from '../provider/types.js';
+import type { Message, Provider } from '../provider/types.js';
 
 function asText(value: unknown, what: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -22,6 +23,11 @@ function asText(value: unknown, what: string): string {
 
 export type TaskDeps = {
   provider: Provider;
+  /**
+   * 会话内的任务表(v2-11)。给了才支持后台派发与追问 —— 它是**会话级**的对象:
+   * 一个会话一张,进程走表走(见 core/task-registry.ts 的说明)。
+   */
+  registry?: TaskRegistry;
   /**
    * 角色按名换模型(v2-03):给一个 provider id,造出那一家的实例。
    * 不给(或返回 undefined)时,角色一律用主对话的 Provider —— 这也是
@@ -170,7 +176,190 @@ export type TaskSpec = {
   description: string;
   prompt: string;
   context?: string;
+  /** 后台派发(v2-11):立刻返回任务 id,活儿挂在任务表上继续跑。 */
+  background?: boolean;
 };
+
+/** 装配好的一趟派发 —— 角色解析、工具守门、prompt 组装都已经做完。 */
+type RunPlan = {
+  statAgent: string;
+  provider: Provider;
+  system: string;
+  guarded: Toolset;
+  /** 委派 prompt(还没拼输出约定 —— 那一步在 executeRun 里,续跑要拼同一份)。 */
+  delegated: string;
+  outputFields?: readonly string[];
+};
+
+const BACKGROUND_NO_APPROVAL =
+  '这是后台派出去的任务,没有确认通道 —— 需要用户点头的操作一律拒绝,**没有执行**。要它做这类事,请在前台重新派一次。';
+
+/**
+ * 装配一次派发。放在模块层而不是 createTaskTool 里,是因为**续跑**要用同一套
+ * 装配:followup 只该换起点(消息数组),不该顺便换一套角色解析规则。
+ */
+function prepareRun(
+  deps: TaskDeps,
+  spec: TaskSpec,
+  options: { approve?: ToolContext['approve']; background?: boolean },
+): { plan: RunPlan } | { error: string } {
+  const agents = deps.agents;
+  let system = deps.system;
+  let tools = deps.tools;
+  let restriction: AgentRestriction | undefined;
+  let provider = deps.provider;
+  // 统计行上的角色名:点名的用它,没点名就是缺省的探查者(内置 explorer)。
+  let statAgent = 'explorer';
+  /** 角色声明的输出约定(v2-10)。没声明就是 undefined,行为与从前一致。 */
+  let outputFields: readonly string[] | undefined;
+
+  if (spec.agent !== undefined && spec.agent.trim() !== '') {
+    const resolved = resolveAgentRun(deps, spec.agent.trim());
+    if ('error' in resolved) {
+      return { error: resolved.error };
+    }
+    system = resolved.system;
+    tools = resolved.tools;
+    restriction = resolved.restriction;
+    provider = resolved.provider ?? deps.provider;
+    statAgent = resolved.def.name;
+    outputFields = resolved.def.output;
+
+    // v2-09 受限递归:角色用 spawns 显式声明"我还能派谁",而且只在深度
+    // 没到顶时才给它 task 工具。到顶就剥掉 —— 这是防无限套娃的最后一道。
+    const depth = deps.depth ?? 0;
+    const maxDepth = deps.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const spawns = resolved.def.spawns ?? [];
+    if (spawns.length > 0 && depth < maxDepth && agents) {
+      const child = createTaskTool({
+        ...deps,
+        agents: restrictCatalog(agents, spawns),
+        depth: depth + 1,
+        maxDepth,
+      });
+      tools = [...tools, child];
+    }
+  }
+
+  // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
+  // 背景与任务分开传,拼起来给它,让它一眼分清"环境"与"要做的事"。
+  //
+  // 没有 context 时,委派 prompt 就是**原样的 body** —— v1 起就是逐字如此,
+  // 不能因为多加了几个可选功能就给所有派发套一层前缀。
+  const contextText =
+    spec.context !== undefined && spec.context.trim() !== '' ? spec.context.trim() : undefined;
+  const delegated =
+    contextText !== undefined ? `背景:
+${contextText}
+
+任务:
+${spec.prompt}` : spec.prompt;
+
+  // 子 agent 的工具集必须过守门:角色可以继承主对话全量工具,不过这一层
+  // 它就是一台没有守门的 Remove-Item 机器。approve 从 ToolContext 递来的
+  // 是终端的确认通道;没有它(比如单测里、后台派发)就一路 ask 下去,
+  // 不会误放行。
+  const guarded = guardToolsetForAgent(createToolset(tools), {
+    approve: options.approve ?? (async () => false),
+    ...(options.background === true ? { unapprovedNote: BACKGROUND_NO_APPROVAL } : {}),
+    ...(restriction !== undefined ? { restriction } : {}),
+    ...(deps.rules !== undefined ? { rules: deps.rules } : {}),
+  });
+
+  return {
+    plan: {
+      statAgent,
+      provider,
+      system,
+      guarded,
+      delegated,
+      ...(outputFields !== undefined ? { outputFields } : {}),
+    },
+  };
+}
+
+/** 把输出约定拼到一段委派话后面(v2-10)。续跑也走这里,不能两处各写一遍。 */
+function withContract(plan: RunPlan, body: string): string {
+  const fields = plan.outputFields;
+  return fields !== undefined && fields.length > 0
+    ? `${body}
+
+${contractInstruction(fields)}`
+    : body;
+}
+
+/**
+ * 跑一趟装配好的派发,带回结论、花费与**结束时的消息数组**。
+ *
+ * history 是起点:空数组 = 冷启动;非空 = 在原对话上续跑(v2-11 的 followup)。
+ * 这两件事的差别只有"有没有把历史带上",所以是同一个函数。
+ */
+async function executeRun(
+  deps: TaskDeps,
+  plan: RunPlan,
+  channel: { signal?: AbortSignal; emit?: (event: SubagentDoneEvent) => void },
+  prompt: string,
+  history: Message[] = [],
+): Promise<{ text: string; tokens: number; messages: Message[] }> {
+  const startedAt = Date.now();
+  const first = withContract(plan, prompt);
+
+  const runOnce = (text: string) =>
+    continueSubagent(
+      {
+        provider: plan.provider,
+        tools: plan.guarded,
+        system: plan.system,
+        ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+        // 只往上转成本行:子 agent 的工具调用过程刻意不上屏(隔离是它存在的
+        // 理由)。但**再派一层**的成本必须浮上来 —— 那笔钱是主对话付的。
+        ...(channel.emit !== undefined
+          ? {
+              onEvent: (event: LoopEvent) => {
+                if (event.type === 'subagent-done') channel.emit!(event);
+              },
+            }
+          : {}),
+      },
+      history,
+      text,
+      channel.signal,
+    );
+
+  let result = await runOnce(first);
+  let totalTokens = result.tokens;
+
+  // v2-10:声明了输出约定的角色,结论要过一遍宽松校验。不合格**只给一次**
+  // 重试 —— 再拉长就成了反复讨要;而模型反复给不出来的那件事,人自己看原文
+  // 更有用。校验本身只看键在不在,不看类型(见 output-contract.ts)。
+  const fields = plan.outputFields;
+  if (fields !== undefined && fields.length > 0) {
+    let check = checkOutput(result.text, fields);
+    if (!check.ok) {
+      result = await runOnce(`${first}
+
+${retryInstruction(check.missing)}`);
+      totalTokens += result.tokens;
+      check = checkOutput(result.text, fields);
+      if (!check.ok) {
+        result = { ...result, text: contractFailure(plan.statAgent, check.missing, result.text) };
+      }
+    }
+  }
+
+  // 成本回显:多角色最大的隐性代价是 token,先让用户看见。没有 emit 通道
+  // (单测、非交互调用、后台任务)就只是不报 —— 派发本身不受影响。
+  // 计的是**这一趟**的总账:重试那一次也付了钱,不能只报第一次。
+  channel.emit?.({
+    type: 'subagent-done',
+    agent: plan.statAgent,
+    model: plan.provider.model,
+    tokens: totalTokens,
+    durationMs: Date.now() - startedAt,
+  });
+
+  return { text: result.text, tokens: totalTokens, messages: result.messages };
+}
 
 /**
  * 把一次探查委派出去的工具。
@@ -190,130 +379,65 @@ export function createTaskTool(deps: TaskDeps): Tool {
     ? `可用角色:${agents.list().map((agent) => `${agent.name}(${agent.description})`).join(';')}。`
     : '';
 
-  /** 派一个子 agent,带回它的结论。批量与单发共用这一条路径。 */
+    /** 派一个子 agent,带回它的结论。批量与单发共用这一条路径。 */
   async function runOne(spec: TaskSpec, context: ToolContext | undefined): Promise<string> {
-    const label = spec.description;
-    const body = spec.prompt;
-
-    let system = deps.system;
-    let tools = deps.tools;
-    let restriction: AgentRestriction | undefined;
-    let provider = deps.provider;
-    // 统计行上的角色名:点名的用它,没点名就是缺省的探查者(内置 explorer)。
-    let statAgent = 'explorer';
-    /** 角色声明的输出约定(v2-10)。没声明就是 undefined,行为与从前一致。 */
-    let outputFields: readonly string[] | undefined;
-
-    if (spec.agent !== undefined && spec.agent.trim() !== '') {
-      const resolved = resolveAgentRun(deps, spec.agent.trim());
-      if ('error' in resolved) {
-        return resolved.error;
-      }
-      system = resolved.system;
-      tools = resolved.tools;
-      restriction = resolved.restriction;
-      provider = resolved.provider ?? deps.provider;
-      statAgent = resolved.def.name;
-      outputFields = resolved.def.output;
-
-      // v2-09 受限递归:角色用 spawns 显式声明"我还能派谁",而且只在深度
-      // 没到顶时才给它 task 工具。到顶就剥掉 —— 这是防无限套娃的最后一道。
-      const depth = deps.depth ?? 0;
-      const maxDepth = deps.maxDepth ?? DEFAULT_MAX_DEPTH;
-      const spawns = resolved.def.spawns ?? [];
-      if (spawns.length > 0 && depth < maxDepth && agents) {
-        const child = createTaskTool({
-          ...deps,
-          agents: restrictCatalog(agents, spawns),
-          depth: depth + 1,
-          maxDepth,
-        });
-        tools = [...tools, child];
-      }
-    }
-
-    // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
-    // 背景与任务分开传,拼起来给它,让它一眼分清"环境"与"要做的事"。
-    // 输出约定(v2-10)也拼在这里:它是这一趟派发的规矩,不是角色一辈子的话术。
-    //
-    // 没有 context、也没有约定时,委派 prompt 就是**原样的 body** —— v1 起
-    // 就是逐字如此,不能因为多加了两个可选功能就给所有派发套一层前缀。
-    const contextText =
-      spec.context !== undefined && spec.context.trim() !== '' ? spec.context.trim() : undefined;
-    const parts: string[] =
-      contextText !== undefined ? [`背景:\n${contextText}`, `任务:\n${body}`] : [body];
-    if (outputFields !== undefined && outputFields.length > 0) {
-      parts.push(contractInstruction(outputFields));
-    }
-    const delegated = parts.join('\n\n');
-
-    // 子 agent 的工具集必须过守门:角色可以继承主对话全量工具,不过这一层
-    // 它就是一台没有守门的 Remove-Item 机器。approve 从 ToolContext 递来的
-    // 是终端的确认通道;没有它(比如单测里)就一路 ask 下去,不会误放行。
-    const guarded = guardToolsetForAgent(createToolset(tools), {
-      approve: context?.approve ?? (async () => false),
-      ...(restriction !== undefined ? { restriction } : {}),
-      ...(deps.rules !== undefined ? { rules: deps.rules } : {}),
+    const prepared = prepareRun(deps, spec, {
+      ...(context?.approve !== undefined ? { approve: context.approve } : {}),
     });
+    if ('error' in prepared) {
+      return prepared.error;
+    }
 
-    const startedAt = Date.now();
     try {
-      const runOnce = (prompt: string) =>
-        runSubagent(
-          {
-            provider,
-            tools: guarded,
-            system,
-            ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
-            // 只往上转成本行:子 agent 的工具调用过程刻意不上屏(隔离是它存在的
-            // 理由)。但**再派一层**的成本必须浮上来 —— 那笔钱是主对话付的。
-            ...(context?.emit !== undefined
-              ? {
-                  onEvent: (event: LoopEvent) => {
-                    if (event.type === 'subagent-done') context.emit!(event);
-                  },
-                }
-              : {}),
-          },
-          prompt,
-          context?.signal,
-        );
-
-      let result = await runOnce(delegated);
-      let totalTokens = result.tokens;
-
-      // v2-10:声明了输出约定的角色,结论要过一遍宽松校验。不合格**只给一次**
-      // 重试 —— 再拉长就成了反复讨要;而模型反复给不出来的那件事,人自己看原文
-      // 更有用。校验本身只看键在不在,不看类型(见 output-contract.ts)。
-      if (outputFields !== undefined && outputFields.length > 0) {
-        let check = checkOutput(result.text, outputFields);
-        if (!check.ok) {
-          result = await runOnce(`${delegated}\n\n${retryInstruction(check.missing)}`);
-          totalTokens += result.tokens;
-          check = checkOutput(result.text, outputFields);
-          if (!check.ok) {
-            result = { ...result, text: contractFailure(statAgent, check.missing, result.text) };
-          }
-        }
-      }
-
-      // 成本回显:多角色最大的隐性代价是 token,先让用户看见。没有 emit 通道
-      // (单测、非交互调用)就只是不报 —— 派发本身不受影响。
-      // 计的是**这一趟**的总账:重试那一次也付了钱,不能只报第一次。
-      context?.emit?.({
-        type: 'subagent-done',
-        agent: statAgent,
-        model: provider.model,
-        tokens: totalTokens,
-        durationMs: Date.now() - startedAt,
-      });
-
+      const result = await executeRun(
+        deps,
+        prepared.plan,
+        {
+          ...(context?.signal !== undefined ? { signal: context.signal } : {}),
+          ...(context?.emit !== undefined ? { emit: context.emit } : {}),
+        },
+        prepared.plan.delegated,
+      );
       return result.text;
     } catch (error) {
       // 子任务失败必须回到主对话。否则模型只知道"没有结论",无从判断该重派、
       // 该换个提示,还是该自己来做 —— 它会原地重派一次,然后第二次也失败。
-      return `子任务「${label}」失败了,没有拿到结论。错误原文:${(error as Error).message}`;
+      return `子任务「${spec.description}」失败了,没有拿到结论。错误原文:${(error as Error).message}`;
     }
+  }
+
+  /**
+   * 后台派发:开一条任务表记录,把活儿挂上去,立刻回来交一个 id。
+   *
+   * 三条刻意的选择:
+   * - **不继承这一轮的 signal** —— "后台"的意思就是要活过这一轮。用户按了中断,
+   *   该停的是等着它的这次对话,不是它。
+   * - **不给确认通道**(approve 一律拒绝):后台任务在跑到一半要用户点头,就会
+   *   和主对话抢同一行输入。所以它在装配时就按"问不到人"来(见 prepareRun 的
+   *   background 分支),而不是运行时才发现问不到。
+   * - **不报成本行**,也不往主对话注入任何消息:后台任务的结论停在任务表里,由
+   *   `task_status` 主动去取。往对话里注消息会破坏压缩器"工具调用与结果成对"的
+   *   假设 —— 那条假设一旦破,压缩后的历史就会缺一半。
+   */
+  function startBackground(spec: TaskSpec, registry: TaskRegistry): string {
+    const prepared = prepareRun(deps, spec, { background: true });
+    if ('error' in prepared) {
+      return prepared.error;
+    }
+
+    const entry = registry.start({
+      agent: prepared.plan.statAgent,
+      description: spec.description,
+      spec: { ...spec },
+    });
+
+    // 不 await —— 这就是"后台"。失败也不许抛出来(没人接),记进任务表。
+    void executeRun(deps, prepared.plan, {}, prepared.plan.delegated).then(
+      (result) => registry.finish(entry.id, result),
+      (error: unknown) => registry.fail(entry.id, (error as Error).message),
+    );
+
+    return `已经派出去了:任务 ${entry.id}(${prepared.plan.statAgent} · ${spec.description}),在后台跑,不占这条对话。用 task_status 查它完没完 —— 完了再决定要不要 task_followup 追问。`;
   }
 
   /** 一次扇出多个。结果按**调用序**回传,并合成一条文本 —— 主对话只多一条结果。 */
@@ -325,6 +449,11 @@ export function createTaskTool(deps: TaskDeps): Tool {
     const specs: TaskSpec[] = [];
     for (const [index, raw] of items.entries()) {
       const entry = (raw ?? {}) as Record<string, unknown>;
+      // 批量与后台不搭:批量本来就是并发跑的,再套一层"后台的后台"只会让人
+      // 分不清哪个 id 对应哪一项。要逐个跟踪,分开调用。
+      if (entry.background === true) {
+        return `批量派发不支持 background(tasks[${index}] 里写了)。批量本来就是并发跑的;要逐个跟踪就分几次单独调用。`;
+      }
       try {
         specs.push({
           ...(typeof entry.agent === 'string' ? { agent: entry.agent } : {}),
@@ -343,7 +472,9 @@ export function createTaskTool(deps: TaskDeps): Tool {
 
     return [
       `派发 ${specs.length} 个角色(并发上限 ${limit}),按调用序回传:`,
-      ...specs.map((spec, index) => `\n【${index + 1}】${spec.agent ?? 'explorer'} — ${spec.description}\n${results[index]}`),
+      ...specs.map((spec, index) => `
+【${index + 1}】${spec.agent ?? 'explorer'} — ${spec.description}
+${results[index]}`),
     ].join('');
   }
 
@@ -357,6 +488,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
         '什么时候别用:你知道确切位置(直接 read_file)、你本来就需要那些原文(那把它读进主对话才对)。',
         '子 agent 看不到这段对话,你交代的上下文是它唯一的信息来源。',
         '一次要查几件互不相干的事时,用 tasks 数组一次派出去(会并行跑,结果按顺序回)。',
+        '如果你还要接着做别的事、不想在这里干等,加 background: true —— 它立刻给你一个任务 id,你用 task_status 回头取结论。',
         ...(agentHint ? [agentHint] : []),
       ].join(''),
       inputSchema: {
@@ -375,6 +507,11 @@ export function createTaskTool(deps: TaskDeps): Tool {
             type: 'string',
             description:
               '子 agent 需要的背景(它在哪个仓库干活、相关约定、已经知道的事实)。子 agent 冷启动,这段背景写薄了它会乱翻。',
+          },
+          background: {
+            type: 'boolean',
+            description:
+              '在后台跑:立刻拿到任务 id,不占这条对话。结论停在任务表里,之后用 task_status 取、用 task_followup 追问。只有不需要用户确认的角色适合它(后台任务问不到人)。',
           },
           tasks: {
             type: 'array',
@@ -405,15 +542,186 @@ export function createTaskTool(deps: TaskDeps): Tool {
         return runBatch(raw.tasks, context);
       }
 
-      return runOne(
-        {
-          ...(typeof raw.agent === 'string' ? { agent: raw.agent } : {}),
-          description: asText(raw.description, 'description'),
-          prompt: asText(raw.prompt, 'prompt'),
-          ...(typeof raw.context === 'string' ? { context: raw.context } : {}),
-        },
-        context,
-      );
+      const spec: TaskSpec = {
+        ...(typeof raw.agent === 'string' ? { agent: raw.agent } : {}),
+        description: asText(raw.description, 'description'),
+        prompt: asText(raw.prompt, 'prompt'),
+        ...(typeof raw.context === 'string' ? { context: raw.context } : {}),
+      };
+
+      if (raw.background === true) {
+        const registry = deps.registry;
+        if (!registry) {
+          return '这个会话没有任务表,后台派发不可用 —— 去掉 background 直接派,就会等它跑完再回来。';
+        }
+        return startBackground(spec, registry);
+      }
+
+      return runOne(spec, context);
     },
   };
+}
+
+
+/**
+ * 查后台任务的状态(v2-11)。不传 id 就列全部。
+ *
+ * 它是后台任务的**唯一出口**:后台跑完不往主对话注消息(那会破坏压缩器"工具调用
+ * 与结果成对"的假设),所以结论只停在这里,由模型主动来取。
+ */
+export function createTaskStatusTool(deps: TaskDeps): Tool {
+  return {
+    spec: {
+      name: 'task_status',
+      description: [
+        '查后台任务(用 background: true 派出去的)现在怎么样了。',
+        '不传 id 列出全部;传了就给出那一条,已经跑完的连结论一起给你。',
+        '什么时候用它:你派了个后台任务、手上这件事做完了,回头收账。',
+      ].join(''),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '任务 id,比如 t1。不传就列出全部。' },
+        },
+        required: [],
+      },
+    },
+
+    async run(input) {
+      const raw = (input ?? {}) as Record<string, unknown>;
+      const registry = deps.registry;
+      if (!registry) {
+        return '这个会话没有任务表。';
+      }
+
+      const asked = typeof raw.id === 'string' && raw.id.trim() !== '' ? raw.id.trim() : undefined;
+      if (asked === undefined) {
+        const all = registry.list();
+        if (all.length === 0) {
+          return '这个会话还没有派发过任务。';
+        }
+        return ['任务表(最早的在上):', ...all.map((entry) => renderTaskLine(entry))].join('\n');
+      }
+
+      const entry = registry.get(asked);
+      if (!entry) {
+        const known = registry.list().map((each) => each.id);
+        return known.length === 0
+          ? `没有这个任务:${asked}。这个会话还没派发过任务。`
+          : `没有这个任务:${asked}。现有的是:${known.join('、')}`;
+      }
+
+      const lines = [renderTaskLine(entry)];
+      if (entry.state === 'done') {
+        lines.push('', '结论:', entry.text ?? '(空)');
+      } else if (entry.state === 'failed') {
+        lines.push('', '错误原文:', entry.error ?? '(没有错误信息)');
+      }
+      return lines.join('\n');
+    },
+  };
+}
+
+/**
+ * 给一个已经跑完的任务补一句指令,让它在**原来的消息数组**上接着跑(v2-11)。
+ *
+ * 为什么要有它:子 agent 花了半分钟翻了二十个文件,回头看结论时想问的那句
+ * "那 X 呢" —— 重新派一次要从零再翻一遍,钱和时间都白花,还可能得到互相矛盾
+ * 的结论。续跑用的是它自己的历史,所以这句追问是**接着说的**。
+ *
+ * 装配是重新来的一遍(角色文件是唯一事实来源):改过角色文件再续跑,它用的是
+ * 新版;别把续跑当成"同一个 agent 的延续"去指望。
+ */
+export function createTaskFollowupTool(deps: TaskDeps): Tool {
+  return {
+    spec: {
+      name: 'task_followup',
+      description: [
+        '给一个跑完的后台任务补一句话,让它在自己上一趟的对话上接着干。',
+        '什么时候用它:task_status 拿到结论,只差一点 —— 比如它说"不确定 X 在哪",你想让它顺手确认。',
+        '别用它换方向查:它带着上一趟的全部历史,越跑越贵。要另起一摊就重新派一次。',
+      ].join(''),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '任务 id,从派发结果或 task_status 里拿' },
+          prompt: {
+            type: 'string',
+            description: '补的这句指令。它看得见自己前面说过什么、查过什么,不用重复交代背景。',
+          },
+        },
+        required: ['id', 'prompt'],
+      },
+    },
+
+    async run(input, context) {
+      const raw = (input ?? {}) as Record<string, unknown>;
+      const registry = deps.registry;
+      if (!registry) {
+        return '这个会话没有任务表,没法追问。';
+      }
+
+      const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+      if (id === '') {
+        return 'task_followup 要一个任务 id,例如 t1。';
+      }
+
+      const entry = registry.get(id);
+      if (!entry) {
+        const known = registry.list().map((each) => each.id);
+        return known.length === 0
+          ? `没有这个任务:${id}。这个会话还没派发过任务。`
+          : `没有这个任务:${id}。现有的是:${known.join('、')}`;
+      }
+
+      // 只有跑完的能追问:还在跑的插话会把它自己的对话搅乱;失败的那趟没有可续的历史。
+      if (entry.state === 'running') {
+        return `任务 ${id} 还在跑。先用 task_status 看它完没完 —— 现在插话会让它两件事都说不清。`;
+      }
+      if (entry.state === 'failed') {
+        return `任务 ${id} 失败了,没有可以接着跑的历史。错误原文:${entry.error ?? '(没有错误信息)'}。要重来就重新派一次。`;
+      }
+
+      const prepared = prepareRun(deps, entry.spec, {
+        ...(context?.approve !== undefined ? { approve: context.approve } : {}),
+      });
+      if ('error' in prepared) {
+        return prepared.error;
+      }
+
+      try {
+        const result = await executeRun(
+          deps,
+          prepared.plan,
+          {
+            ...(context?.signal !== undefined ? { signal: context.signal } : {}),
+            ...(context?.emit !== undefined ? { emit: context.emit } : {}),
+          },
+          typeof raw.prompt === 'string' ? raw.prompt : '',
+          entry.messages ?? [],
+        );
+        // 累加:任务表里的 tokens 是这一摊活儿的总账,不是最后一趟的。
+        registry.finish(entry.id, result);
+        const total =
+          entry.tokens >= 1000 ? `${(entry.tokens / 1000).toFixed(1)}k` : String(entry.tokens);
+        return `任务 ${id} 接着跑完了(累计 ~${total} token):\n\n${result.text}`;
+      } catch (error) {
+        // 追问失败不改任务状态:上一条结论还在、也还有效,只是这一句没跑成。
+        return `追问没有跑成:${(error as Error).message}。任务 ${id} 的结论还是原来那条。`;
+      }
+    },
+  };
+}
+
+/**
+ * 派发三件套:派、查、追问。三者共用**同一张**任务表 —— 分开建表的话,
+ * `task` 派出去的任务 `task_status` 就查不到。
+ */
+export function createTaskTools(deps: TaskDeps): Tool[] {
+  const withRegistry: TaskDeps = deps.registry ? deps : { ...deps, registry: createTaskRegistry() };
+  return [
+    createTaskTool(withRegistry),
+    createTaskStatusTool(withRegistry),
+    createTaskFollowupTool(withRegistry),
+  ];
 }

@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { runTurn } from '../core/loop.js';
 import { estimateMessageTokens } from '../core/tokens.js';
 import { createToolset } from '../core/toolset.js';
-import { createTaskTool, resolveAgentRun } from './task.js';
+import { createTaskFollowupTool, createTaskStatusTool, createTaskTool, resolveAgentRun } from './task.js';
+import { createTaskRegistry } from '../core/task-registry.js';
 import type { SubagentDoneEvent, ToolContext } from '../core/tool.js';
 import type { AgentCatalog, AgentDef } from '../core/agents.js';
 import type { Tool } from '../core/tool.js';
@@ -1097,4 +1098,217 @@ test('重试那一次的花费也算进成本行', async () => {
   ]);
   assert.ok(events[0]!.tokens >= single, `报的要多于单次(${events[0]!.tokens} vs ${single})`);
   assert.ok(expected > 0);
+});
+
+
+// ---------- v2-11:后台派发、状态查询与续跑 ----------
+
+/** 一个卡在闸门后面的 Provider —— 用来证明"后台派发没有等它"。 */
+function gated(response: ProviderResponse): { provider: Provider; release: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    release,
+    provider: {
+      id: 'gated',
+      model: 'gated',
+      async send() {
+        await gate;
+        return response;
+      },
+    },
+  };
+}
+
+function timeoutAfter(ms: number, what: string): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error(what)), ms).unref();
+  });
+}
+
+async function waitFor(condition: () => boolean, what: string, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`等不到:${what}`);
+}
+
+test('后台派发:立刻返回任务 id,结论停在任务表里', async () => {
+  const gate = gated({ text: '后台结论', toolCalls: [] });
+  const registry = createTaskRegistry();
+  const deps = { provider: gate.provider, tools: [], system: 'x', registry };
+  const task = createTaskTool(deps);
+
+  const out = await Promise.race([
+    task.run({ description: '查用法', prompt: 'p', background: true }),
+    timeoutAfter(2000, '后台派发居然等在那里了 —— 那就不叫后台'),
+  ]);
+
+  assert.match(out as string, /任务 t1/);
+  assert.equal(registry.get('t1')?.state, 'running', '刚派出去的时候它该还在跑');
+
+  const status = createTaskStatusTool(deps);
+  assert.match((await status.run({})) as string, /t1 · explorer · 运行中/);
+
+  gate.release();
+  await waitFor(() => registry.get('t1')?.state === 'done', '后台任务跑完');
+
+  assert.match((await status.run({ id: 't1' })) as string, /后台结论/);
+  assert.match((await status.run({})) as string, /t1 · explorer · 已完成/);
+});
+
+test('续跑用的是它自己那趟的消息数组,不是冷启动', async () => {
+  const sub = scripted({ text: '第一趟结论', toolCalls: [] }, { text: '补充结论', toolCalls: [] });
+  const registry = createTaskRegistry();
+  const deps = { provider: sub.provider, tools: [], system: 'x', registry };
+
+  await createTaskTool(deps).run({ description: '查用法', prompt: '去看 a.ts', background: true });
+  await waitFor(() => registry.get('t1')?.state === 'done', '后台跑完');
+
+  const second = await createTaskFollowupTool(deps).run({ id: 't1', prompt: '那 b.ts 呢' });
+  assert.match(second as string, /补充结论/);
+
+  const request = sub.requests[1]!;
+  assert.equal(request.messages.length, 3, '它该看得见自己上一趟说过什么 —— 看不见就叫冷启动');
+  assert.equal((request.messages[0] as { text: string }).text, '去看 a.ts');
+  assert.equal((request.messages[1] as { text: string }).text, '第一趟结论');
+  assert.equal((request.messages[2] as { text: string }).text, '那 b.ts 呢');
+
+  const entry = registry.get('t1')!;
+  assert.equal(entry.text, '补充结论');
+  assert.equal(entry.messages?.length, 4, '续跑之后的消息数组也要收回任务表(两条旧的 + 一问一答),好接着再追');
+});
+
+test('续跑的四条拒绝:还在跑 / 失败过 / 没有这个 id / 压根没有任务表', async () => {
+  const gate = gated({ text: 'x', toolCalls: [] });
+  const registry = createTaskRegistry();
+  const deps = { provider: gate.provider, tools: [], system: 'x', registry };
+  const followup = createTaskFollowupTool(deps);
+
+  await createTaskTool(deps).run({ description: 'd', prompt: 'p', background: true });
+  assert.match((await followup.run({ id: 't1', prompt: '再查' })) as string, /还在跑/);
+
+  gate.release();
+  await waitFor(() => registry.get('t1')?.state === 'done', '后台跑完');
+  assert.match((await followup.run({ id: 't9', prompt: '再查' })) as string, /没有这个任务:t9/);
+
+  const failed = createTaskRegistry();
+  const failingDeps = { provider: scripted(new Error('接口 500')).provider, tools: [], system: 'x', registry: failed };
+  await createTaskTool(failingDeps).run({ description: 'd', prompt: 'p', background: true });
+  await waitFor(() => failed.get('t1')?.state === 'failed', '后台失败');
+  assert.match((await createTaskStatusTool(failingDeps).run({ id: 't1' })) as string, /接口 500/);
+  const refusal = (await createTaskFollowupTool(failingDeps).run({ id: 't1', prompt: '再查' })) as string;
+  assert.match(refusal, /失败了/);
+  assert.match(refusal, /接口 500/, '拒绝的时候要带上错误原文,不然没法判断该不该重派');
+
+  const bare = { provider: gate.provider, tools: [], system: 'x' };
+  assert.match((await createTaskStatusTool(bare).run({})) as string, /没有任务表/);
+  assert.match((await createTaskFollowupTool(bare).run({ id: 't1', prompt: 'p' })) as string, /没有任务表/);
+});
+
+test('后台任务没有确认通道:要用户点头的操作一律拒绝,而且不说"用户没批准"', async () => {
+  const sub = scripted(
+    {
+      text: null,
+      toolCalls: [{ id: 'c1', name: 'write_file', input: { path: 'x.txt', content: 'x' } }],
+    },
+    { text: '写不了,那我报告一下', toolCalls: [] },
+  );
+  let wrote = false;
+  const writeTool: Tool = {
+    spec: { name: 'write_file', description: '写', inputSchema: { type: 'object' } },
+    async run() {
+      wrote = true;
+      return '写了';
+    },
+  };
+
+  const registry = createTaskRegistry();
+  await createTaskTool({ provider: sub.provider, tools: [writeTool], system: 'x', registry }).run({
+    description: '写个文件',
+    prompt: '写',
+    background: true,
+  });
+  await waitFor(() => registry.get('t1')?.state === 'done', '后台跑完');
+
+  const toolResult = sub.requests[1]!.messages.find((message) => message.role === 'tool');
+  const text = JSON.stringify(toolResult);
+  assert.match(text, /后台派出去的任务/, '理由要说对:这是后台,不是用户拒绝的');
+  assert.ok(!/用户没有批准/.test(text), '不能把责任推给一个从没被问过的人');
+  assert.equal(wrote, false, '没批准就是没执行');
+});
+
+test('批量里写 background:整批不发起,并指出第几项', async () => {
+  const sub = scripted({ text: '不该跑起来', toolCalls: [] });
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x' });
+
+  const out = await task.run({
+    tasks: [{ description: 'a', prompt: 'pa' }, { description: 'b', prompt: 'pb', background: true }],
+  });
+
+  assert.match(out as string, /批量派发不支持 background/);
+  assert.match(out as string, /tasks\[1\]/, '要说清是第几项');
+  assert.equal(sub.requests.length, 0, '整批都不该发起');
+});
+
+test('派/查/追问三个工具的结果进压缩器后,调用与结果仍然成对(夹具)', async () => {
+  const { compact } = await import('../core/compact.js');
+  const { estimateMessageTokens } = await import('../core/tokens.js');
+
+  const sub = scripted({ text: '结论', toolCalls: [] }, { text: '补充', toolCalls: [] });
+  const registry = createTaskRegistry();
+  const tools = [
+    createTaskTool({ provider: sub.provider, tools: [], system: 'x', registry }),
+    createTaskStatusTool({ provider: sub.provider, tools: [], system: 'x', registry }),
+    createTaskFollowupTool({ provider: sub.provider, tools: [], system: 'x', registry }),
+  ];
+
+  const main = scripted(
+    {
+      text: null,
+      toolCalls: [
+        { id: 'c1', name: 'task', input: { description: '查 a', prompt: 'pa', background: true } },
+      ],
+    },
+    { text: null, toolCalls: [{ id: 'c2', name: 'task_status', input: { id: 't1' } }] },
+    { text: null, toolCalls: [{ id: 'c3', name: 'task_followup', input: { id: 't1', prompt: '那 b 呢' } }] },
+    { text: '好', toolCalls: [] },
+  );
+
+  const turn = await runTurn(
+    { provider: main.provider, tools: createToolset(tools), system: '主提示' },
+    [{ role: 'user', text: '开始' }],
+  );
+
+  assert.equal(main.requests.length, 4, '三个工具都该被真的调用一遍');
+
+  for (const did of ['none', 'trimmed', 'summarized'] as const) {
+    // 三种预算:从装得下、到只能裁、到必须摘要 —— 三条路径都走一遍。
+    const budget = did === 'none' ? 1_000_000 : did === 'trimmed' ? 60 : 1;
+    const result = await compact(turn.messages, {
+      estimate: estimateMessageTokens,
+      budget,
+      summarize: async () => '摘要',
+      floor: 1,
+      keepRecentMessages: 2,
+    });
+
+    const messages = result.messages;
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i]!;
+      if (message.role !== 'assistant' || !message.toolCalls) continue;
+      const next = messages[i + 1];
+      assert.ok(next && next.role === 'tool', `[${did}] 压缩后第 ${i} 条 assistant 的 toolCalls 失去配对`);
+      if (!next || next.role !== 'tool') continue;
+      assert.deepEqual(
+        next.results.map((r) => r.id).sort(),
+        message.toolCalls.map((c) => c.id).sort(),
+        `[${did}] 后台任务的结论**没有**注入对话,所以配对不该被它破坏`,
+      );
+    }
+  }
 });

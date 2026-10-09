@@ -3,7 +3,8 @@ import { SUBAGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../core/system-prompt.js'
 import { createProvider } from '../provider/index.js';
 import type { Provider } from '../provider/types.js';
 import { createTools, createExplorerTools } from '../tools/index.js';
-import { createTaskTool } from '../tools/task.js';
+import { createTaskRegistry } from '../core/task-registry.js';
+import { createTaskTools } from '../tools/task.js';
 import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
@@ -94,7 +95,9 @@ async function main(): Promise<number> {
   // 主对话全量工具传给 task 作白名单取材范围;白名单缺省(角色没写 tools)
   // 时继承它但剥掉 task 自己。
   const mainTools = [...createTools({ todos }), createSkillTool(skills)];
-  const task = createTaskTool({
+  // 派发三件套(派/task_status/task_followup)共用一张会话级任务表 —— 一个会话
+  // 一张,进程走表走,刻意不落盘(见 core/task-registry.ts)。
+  const taskTools = createTaskTools({
     provider,
     providerFor,
     tools: createExplorerTools(),
@@ -103,11 +106,12 @@ async function main(): Promise<number> {
     agents,
     allTools: mainTools,
     rules: outcome.rules,
+    registry: createTaskRegistry(),
   });
 
   await startRepl({
     provider,
-    tools: [...mainTools, task],
+    tools: [...mainTools, ...taskTools],
     agentNames: agents.list().map((agent) => agent.name),
     rules: outcome.rules,
     system: [
