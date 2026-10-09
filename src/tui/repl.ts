@@ -17,6 +17,8 @@ export type ReplOptions = {
   budget?: number;
   /** 可点名的角色名(@点名用)。不给就关闭 @ 展开。 */
   agentNames?: string[];
+  /** 用户层的权限规则(settings.json 的 permissions)。 */
+  rules?: readonly { pattern: string; verdict: 'allow' | 'ask' | 'deny' }[];
 };
 
 const EXIT_COMMANDS = new Set(['/exit', '/quit', '/q']);
@@ -100,7 +102,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   const session = createSession({
     provider: options.provider,
-    tools: guardToolset(createToolset(options.tools), { approve: ask }),
+    tools: guardToolset(createToolset(options.tools), {
+      approve: ask,
+      ...(options.rules !== undefined ? { rules: options.rules } : {}),
+    }),
     system: options.system,
     onEvent: renderEvent,
     ...(options.budget !== undefined ? { budget: options.budget } : {}),

@@ -22,6 +22,63 @@ export function parseAgentRestriction(raw: string | undefined): AgentRestriction
   return raw?.trim() === 'read-only' ? 'read-only' : undefined;
 }
 
+/** 用户层能表达的三种态度。 */
+export type Strictness = 'allow' | 'ask' | 'deny';
+
+/** 用户的权限规则:按声明顺序排列(键序即优先级),支持 `*` 与 `前缀*`。 */
+export type PermissionRules = ReadonlyArray<{ pattern: string; verdict: Strictness }>;
+
+const VERDICTS: readonly Strictness[] = ['allow', 'ask', 'deny'];
+
+/**
+ * 把 settings.json 里的 `permissions` 解析成规则表。
+ *
+ * 坏值**报错而不是跳过**:权限是一道安全设置,把它悄悄降级成默认,用户会以为
+ * 自己的收紧生效了,而它没有 —— 这种"以为"比不配更危险。
+ */
+export function parsePermissionRules(raw: unknown): { rules: PermissionRules } | { error: string } {
+  if (raw === undefined) return { rules: [] };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { error: 'permissions 要是一个对象,形如 { "write_file": "ask", "run_command*": "deny" }。' };
+  }
+
+  const rules: { pattern: string; verdict: Strictness }[] = [];
+  for (const [pattern, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (pattern.trim() === '') return { error: 'permissions 里有一个空键名,不知道它指的是什么工具。' };
+    if (typeof value !== 'string' || !VERDICTS.includes(value as Strictness)) {
+      return {
+        error: `permissions 里 ${pattern} 的值只能是 ${VERDICTS.join(' / ')},收到的是 ${JSON.stringify(value)}。`,
+      };
+    }
+    rules.push({ pattern, verdict: value as Strictness });
+  }
+  return { rules };
+}
+
+function globToRegExp(pattern: string): RegExp {
+  // 只认 `*`(任意长),其余字符一律转义 —— 不引 glob 库,也不让正则元字符
+  // 从配置文件里漏进来。
+  const escaped = pattern
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\\\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+}
+
+/** 按键序取第一条命中的规则。没配就返回 undefined(= 听底座的)。 */
+export function matchRule(rules: PermissionRules, tool: string): Strictness | undefined {
+  return rules.find((rule) => globToRegExp(rule.pattern).test(tool))?.verdict;
+}
+
+function userVerdict(tool: string, strictness: Strictness): Verdict {
+  if (strictness === 'allow') return { kind: 'allow' };
+  if (strictness === 'ask') return { kind: 'ask' };
+  return {
+    kind: 'deny',
+    reason: `你在 settings.json 的 permissions 里把 ${tool} 配成了 deny。`,
+    instead: '确实要放行,就把这条规则删掉或改成 ask / allow,然后重开 hcode。',
+  };
+}
+
 /**
  * 单向收紧的原子操作:两个判定取更严者。
  *
@@ -48,18 +105,45 @@ function readOnlyVerdict(request: PermissionRequest): Verdict {
 }
 
 /**
- * 带角色层的判定。V1 的 `decide` 是用户层(全局),这里把它与角色层收紧
- * 后给出最终判定。**纯函数**,与 `decide` 同样的承诺。
+ * 完整判定:V1 底座 → 用户规则 → 角色层。
+ *
+ * 三层的关系,记牢这一条就不会错:
+ * - **底座**(`decide`)= 没有任何配置时的行为。危险清单的 deny 是**绝对**的,
+ *   在任何一层之前就返回 —— 那是整个安全模型的底,不进谈判。
+ * - **用户规则** = 天花板。用户显式声明可以放宽底座(比如让 write_file 免问),
+ *   那是他自己的机器、他自己的选择;没声明就听底座。
+ * - **角色层** = 只能比天花板更严,永远不能放宽(见 tighten)。
+ *
+ * **纯函数**,与 `decide` 同样的承诺。
+ */
+export function decideWith(
+  request: PermissionRequest,
+  layers: { restriction?: AgentRestriction; rules?: PermissionRules } = {},
+): Verdict {
+  const base = decide(request);
+
+  // 危险清单:第一优先级,任何层都改不动。理由要说清是"这条命令",不是"你的配置"。
+  if (base.kind === 'deny') return base;
+
+  const declared = layers.rules ? matchRule(layers.rules, request.tool) : undefined;
+  let verdict: Verdict = declared === undefined ? base : userVerdict(request.tool, declared);
+
+  // 角色层收尾:read-only 即便用户放行也拦得住 —— 角色只能比全局更严。
+  if (layers.restriction === 'read-only') {
+    verdict = tighten(verdict, readOnlyVerdict(request));
+  }
+  return verdict;
+}
+
+/**
+ * 只带角色层的判定(用户规则为空)。保留这个入口,是因为 v2-02 的调用方与测试
+ * 都按它写的;它现在就是 `decideWith` 的一个特例。
  */
 export function decideAsAgent(
   request: PermissionRequest,
   restriction?: AgentRestriction,
 ): Verdict {
-  const base = decide(request);
-  if (restriction === 'read-only') {
-    return tighten(base, readOnlyVerdict(request));
-  }
-  return base;
+  return decideWith(request, restriction !== undefined ? { restriction } : {});
 }
 
 export type DangerRule = {
@@ -203,9 +287,12 @@ function refusalLines(reason: string, instead: string): string {
  */
 export function guardToolset(
   inner: Toolset,
-  deps: { approve: (request: PermissionRequest) => Promise<boolean> },
+  deps: { approve: (request: PermissionRequest) => Promise<boolean>; rules?: PermissionRules },
 ): Toolset {
-  return guardToolsetForAgent(inner, { approve: deps.approve });
+  return guardToolsetForAgent(inner, {
+    approve: deps.approve,
+    ...(deps.rules !== undefined ? { rules: deps.rules } : {}),
+  });
 }
 
 /**
@@ -217,14 +304,21 @@ export function guardToolset(
  */
 export function guardToolsetForAgent(
   inner: Toolset,
-  deps: { approve: (request: PermissionRequest) => Promise<boolean>; restriction?: AgentRestriction },
+  deps: {
+    approve: (request: PermissionRequest) => Promise<boolean>;
+    restriction?: AgentRestriction;
+    rules?: PermissionRules;
+  },
 ): Toolset {
   return {
     specs: inner.specs,
 
     async run(call, context) {
       const request: PermissionRequest = { tool: call.name, input: call.input };
-      const verdict = decideAsAgent(request, deps.restriction);
+      const verdict = decideWith(request, {
+        ...(deps.restriction !== undefined ? { restriction: deps.restriction } : {}),
+        ...(deps.rules !== undefined ? { rules: deps.rules } : {}),
+      });
 
       if (verdict.kind === 'allow') {
         // 把确认通道递进去:task 这类工具在内部还要跑子 agent,子 agent 的

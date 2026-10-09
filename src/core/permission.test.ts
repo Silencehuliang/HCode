@@ -273,3 +273,123 @@ test('isZeroBlastRadius:判据与装配层共用同一份名单', () => {
   assert.ok(!isZeroBlastRadius('run_command'));
   assert.ok(!isZeroBlastRadius('edit_file'));
 });
+
+// ---------- v2-08:用户层规则引擎 ----------
+
+import { decideWith, matchRule, parsePermissionRules } from './permission.js';
+
+const rules = (raw: unknown) => {
+  const parsed = parsePermissionRules(raw);
+  if ('error' in parsed) throw new Error(parsed.error);
+  return parsed.rules;
+};
+
+test('parsePermissionRules:解析、键序、坏值报错', () => {
+  const table = rules({ 'write_file': 'ask', 'run_command*': 'deny', '*': 'allow' });
+  assert.deepEqual(table.map((r) => [r.pattern, r.verdict]), [
+    ['write_file', 'ask'],
+    ['run_command*', 'deny'],
+    ['*', 'allow'],
+  ]);
+
+  assert.deepEqual(parsePermissionRules(undefined), { rules: [] });
+  assert.ok('error' in parsePermissionRules('nope'));
+  assert.ok('error' in parsePermissionRules({ write_file: 'maybe' }));
+  assert.ok('error' in parsePermissionRules({ write_file: true }));
+  assert.ok('error' in parsePermissionRules({ '': 'deny' }));
+});
+
+test('matchRule:键序即优先级,支持 * 通配,先命中者赢', () => {
+  const table = rules({ 'todo_*': 'deny', 'todo_read': 'allow', '*': 'ask' });
+
+  assert.equal(matchRule(table, 'todo_write'), 'deny');
+  // todo_read 两条都命中,键序在前的那条赢 —— 即使它更严。
+  assert.equal(matchRule(table, 'todo_read'), 'deny');
+  assert.equal(matchRule(table, 'write_file'), 'ask');
+  assert.equal(matchRule([], 'write_file'), undefined);
+});
+
+test('通配符里的正则元字符被转义,不会漏进来', () => {
+  const table = rules({ 'a.b': 'deny' });
+  assert.equal(matchRule(table, 'a.b'), 'deny');
+  assert.equal(matchRule(table, 'axb'), undefined, '. 必须是字面点,不能当正则通配');
+});
+
+test('用户层是天花板:显式 allow 可放宽底座的 ask;没配则听底座', () => {
+  // 底座:write_file 是 ask。
+  assert.equal(decideWith(call('write_file', { path: 'a.txt' })).kind, 'ask');
+  // 用户显式放行 —— 他的机器、他的选择。
+  assert.equal(
+    decideWith(call('write_file', { path: 'a.txt' }), { rules: rules({ write_file: 'allow' }) }).kind,
+    'allow',
+  );
+  // 用户收紧 —— 底座 allow 的命令变成 deny。
+  const denied = decideWith(call('run_command', { command: 'Get-ChildItem' }), {
+    rules: rules({ 'run_command': 'deny' }),
+  });
+  assert.equal(denied.kind, 'deny');
+  assert.match(denied.kind === 'deny' ? denied.reason : '', /permissions/, '要指出是你的哪条设置拦的');
+  assert.match(denied.kind === 'deny' ? denied.instead : '', /删掉|改成/, '要给出怎么改回来');
+});
+
+test('DANGER_RULES 在任何规则组合下仍然 deny,且理由来自危险清单', () => {
+  const combos = [
+    { '*': 'allow' },
+    { 'run_command': 'allow' },
+    { 'run_command*': 'allow', '*': 'allow' },
+  ];
+  for (const combo of combos) {
+    for (const restriction of [undefined, 'read-only'] as const) {
+      const verdict = decideWith(
+        call('run_command', { command: 'Remove-Item -Recurse -Force .\build' }),
+        { rules: rules(combo), ...(restriction ? { restriction } : {}) },
+      );
+      assert.equal(verdict.kind, 'deny', `组合 ${JSON.stringify(combo)} 下仍然必须 deny`);
+      if (verdict.kind === 'deny') {
+        assert.match(verdict.reason, /递归删除/, '理由是这条命令,不是你的配置');
+      }
+    }
+  }
+});
+
+test('角色层在天花板之内:用户 allow 也放不过 read-only 角色', () => {
+  const verdict = decideWith(call('write_file', { path: 'a.txt' }), {
+    rules: rules({ write_file: 'allow' }),
+    restriction: 'read-only',
+  });
+  assert.equal(verdict.kind, 'deny', '角色只能比全局更严 —— 用户放行不等于角色可以写');
+});
+
+test('不配规则时行为与 V1 完全一致(向后兼容)', () => {
+  for (const request of [
+    call('read_file', { path: 'a.txt' }),
+    call('todo_write', {}),
+    call('write_file', { path: 'a.txt' }),
+    call('run_command', { command: 'Get-ChildItem' }),
+    call('run_command', { command: 'git reset --hard HEAD~1' }),
+    call('某个还不存在的工具'),
+  ]) {
+    assert.deepEqual(
+      decideWith(request),
+      decide(request),
+      `${request.tool} 在没配规则时必须与 V1 逐字一致`,
+    );
+  }
+});
+
+test('guardToolset 把用户规则带到守门层', async () => {
+  let asked = 0;
+  const inner = createToolset([
+    {
+      spec: { name: 'write_file', description: '写', inputSchema: { type: 'object' } },
+      async run() { return '写了'; },
+    },
+  ]);
+  const guarded = guardToolset(inner, {
+    approve: async () => { asked += 1; return false; },
+    rules: rules({ write_file: 'allow' }),
+  });
+
+  assert.equal(await guarded.run({ id: 'c1', name: 'write_file', input: { path: 'a' } }), '写了');
+  assert.equal(asked, 0, '用户显式 allow 之后不该再问');
+});

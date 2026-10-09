@@ -99,12 +99,14 @@ async function main(): Promise<number> {
     maxTurns: SUBAGENT_MAX_TURNS,
     agents,
     allTools: mainTools,
+    rules: outcome.rules,
   });
 
   await startRepl({
     provider,
     tools: [...mainTools, task],
     agentNames: agents.list().map((agent) => agent.name),
+    rules: outcome.rules,
     system: [
       SYSTEM_PROMPT,
       renderInstructionsForModel(instructions),

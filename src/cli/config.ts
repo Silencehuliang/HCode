@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ProviderChoice } from '../provider/index.js';
+import { parsePermissionRules, type PermissionRules } from '../core/permission.js';
 import { CLAUDE_DEFAULT_BASE_URL } from '../provider/claude.js';
 import { DEEPSEEK_DEFAULT_BASE_URL } from '../provider/deepseek.js';
 import { GLM_DEFAULT_BASE_URL } from '../provider/glm.js';
@@ -27,6 +28,8 @@ export type ProviderSettings = {
 type SettingsFile = {
   provider?: string;
   providers?: Record<string, ProviderSettings>;
+  /** 用户层的工具权限规则:工具名(支持 `*` 通配)→ allow / ask / deny,键序即优先级。 */
+  permissions?: Record<string, string>;
 };
 
 export type Session = {
@@ -55,6 +58,11 @@ export type ConfigOutcome =
        * "回退主对话"这个动作变成一次运行时报错。
        */
       providers: Record<string, ProviderChoice>;
+      /**
+       * 用户层的权限规则,已按声明顺序合并(项目级在前)。空数组 = 没配,
+       * 行为与 V1 完全一致。
+       */
+      rules: PermissionRules;
     }
   | { ok: false; message: string };
 
@@ -329,6 +337,24 @@ export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
     }
   }
 
+  // 权限规则按"键序即优先级"合并:项目级(高)的键排在前面,同名键项目级赢。
+  // 坏值直接报错 —— 权限是安全设置,悄悄降级成默认会让用户以为自己收紧生效了。
+  const rules: { pattern: string; verdict: 'allow' | 'ask' | 'deny' }[] = [];
+  const seenPatterns = new Set<string>();
+  for (const layer of layers) {
+    const parsed = parsePermissionRules(layer.settings.permissions);
+    if ('error' in parsed) {
+      return { ok: false, message: `权限规则有问题:
+
+${parsed.error}` };
+    }
+    for (const rule of parsed.rules) {
+      if (seenPatterns.has(rule.pattern)) continue;
+      seenPatterns.add(rule.pattern);
+      rules.push(rule);
+    }
+  }
+
   // 明说的排前面:环境变量 > 项目级 > 用户级 > 自动探测 > 默认。
   // 环境变量压过文件,是为了让"这一次跑用另一份凭据"不需要改动落在盘上的东西 ——
   // CI 与临时切换都依赖这一点。
@@ -402,6 +428,7 @@ export function loadConfig(options: LoadOptions = {}): ConfigOutcome {
   return {
     ok: true,
     files,
+    rules,
     providers,
     session: {
       providerId: chosen,

@@ -424,3 +424,71 @@ test('密钥里混进非 ASCII 字符时,说清是第几个字', (t) => {
   );
   assert.doesNotMatch(outcome.message, /sk-abc/, '报错里不能带出密钥本身');
 });
+
+// ---------- v2-08:用户层权限规则 ----------
+
+test('settings.json 的 permissions 被解析进 outcome.rules,键序保留', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    permissions: { 'write_file': 'ask', 'run_command*': 'deny' },
+  } as never);
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.rules, [
+    { pattern: 'write_file', verdict: 'ask' },
+    { pattern: 'run_command*', verdict: 'deny' },
+  ]);
+});
+
+test('项目级 permissions 排在用户级前面(同名项目赢)', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    permissions: { write_file: 'deny', todo_write: 'deny' },
+  } as never);
+
+  const cwd = mkdtempSync(join(tmpdir(), 'hcode-proj-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  mkdirSync(join(cwd, '.hcode'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.hcode', 'settings.json'),
+    JSON.stringify({ permissions: { write_file: 'allow' } }),
+  );
+
+  const outcome = loadConfig({ cwd, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  // 项目级写在最前 → 它是先命中的那条。
+  assert.equal(outcome.rules[0]?.pattern, 'write_file');
+  assert.equal(outcome.rules[0]?.verdict, 'allow');
+  // 用户级里项目没覆盖的键仍然在(不再重复 write_file)。
+  assert.deepEqual(
+    outcome.rules.map((r) => r.pattern),
+    ['write_file', 'todo_write'],
+  );
+});
+
+test('permissions 值写坏 → 直接报错,不静默降级', (t) => {
+  const home = makeHome(t, {
+    provider: 'glm',
+    providers: { glm: { apiKey: 'k' } },
+    permissions: { write_file: 'maybe' },
+  } as never);
+
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, false, '权限是安全设置,坏值不能被当成"没配"');
+  if (outcome.ok) return;
+  assert.match(outcome.message, /权限规则/);
+  assert.match(outcome.message, /write_file/);
+});
+
+test('没有 permissions 字段 → rules 为空,行为与 V1 一致', (t) => {
+  const home = makeHome(t, { provider: 'glm', providers: { glm: { apiKey: 'k' } } });
+  const outcome = loadConfig({ cwd: noProject, home, env: {} });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.rules, []);
+});

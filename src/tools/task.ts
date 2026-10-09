@@ -36,6 +36,8 @@ export type TaskDeps = {
    * 是一次账单教训(oMP 默认 32,那是另一套前提)。
    */
   maxConcurrent?: number;
+  /** 用户层的权限规则,子 agent 同样适用(它们不该绕过用户在 settings 里收的权)。 */
+  rules?: readonly { pattern: string; verdict: 'allow' | 'ask' | 'deny' }[];
 };
 
 const DEFAULT_MAX_CONCURRENT = 3;
@@ -193,6 +195,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
     const guarded = guardToolsetForAgent(createToolset(tools), {
       approve: context?.approve ?? (async () => false),
       ...(restriction !== undefined ? { restriction } : {}),
+      ...(deps.rules !== undefined ? { rules: deps.rules } : {}),
     });
 
     const startedAt = Date.now();
