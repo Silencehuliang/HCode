@@ -26,7 +26,8 @@ for (const tool of ['read_file', 'search_content', 'find_files']) {
 // 实测抓到过的缺陷:todo 只动会话内存里的清单、task 派的子 agent 拿的是只读工具、
 // skill 读的是本地 Markdown 正文 —— 全都碰不到用户磁盘上的一字节,却落进了"一律要问"
 // 的兜底分支。给这类零爆炸半径的工具逐次弹窗,训练出来的就是闭眼按回车。
-for (const tool of ['todo_write', 'todo_update', 'todo_read', 'task', 'skill', 'task_status', 'task_followup']) {
+// v2-14 的 council 同理:议员与记录员的工具集都是空的,它花的是 token,不是用户的文件。
+for (const tool of ['todo_write', 'todo_update', 'todo_read', 'task', 'skill', 'task_status', 'task_followup', 'council']) {
   test(`零爆炸半径工具 ${tool} 直接放行,不打扰用户`, () => {
     const verdict = decide(call(tool, {}));
 

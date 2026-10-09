@@ -97,8 +97,13 @@ function restrictCatalog(catalog: AgentCatalog, allowed: readonly string[]): Age
 
 const DEFAULT_MAX_CONCURRENT = 3;
 
-/** 并发上限下的保序 map:同时最多 limit 个在跑,返回顺序与输入一致。 */
-async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+/**
+ * 并发上限下的保序 map:同时最多 limit 个在跑,返回顺序与输入一致。
+ *
+ * 抽在这里、导出给 council(v2-14)用:两处的需求一模一样 —— 结果的顺序必须是
+ * 用户心里的顺序(第几家里谁说了什么),而不是谁先跑完谁在前。
+ */
+export async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
 

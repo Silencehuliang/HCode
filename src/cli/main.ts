@@ -5,6 +5,9 @@ import type { Provider } from '../provider/types.js';
 import { createTools, createExplorerTools } from '../tools/index.js';
 import { createTaskRegistry } from '../core/task-registry.js';
 import { createTaskTools } from '../tools/task.js';
+import { createCouncilTool } from '../tools/council.js';
+import type { Councilor } from '../tools/council.js';
+import { MIN_COUNCILORS, renderCouncilNote } from '../core/council.js';
 import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
@@ -135,15 +138,40 @@ async function main(): Promise<number> {
     cwd,
   });
 
+  // 多模型共识(v2-14):能问的家 = 配得出密钥的那些,顺序按配置里的家序(glm
+  // → deepseek → claude)。不到两家就**不注册**这个工具 —— 一家的"共识"只是一
+  // 次绕远路的提问,而模型看见工具就会去用,给它一个注定没意义的工具是骗它。
+  const councilors: Councilor[] = [];
+  for (const id of Object.keys(outcome.providers)) {
+    const instance = providerFor(id);
+    if (instance) councilors.push({ id, provider: instance });
+  }
+  const councilReady = councilors.length >= MIN_COUNCILORS;
+
   await startRepl({
     provider,
-    tools: [...mainTools, ...taskTools],
+    tools: [
+      ...mainTools,
+      ...taskTools,
+      ...(councilReady ? [createCouncilTool({ councilors, synthesizer: provider })] : []),
+    ],
     agentNames: agents.list().map((agent) => agent.name),
+    council: councilReady,
+    ...(councilReady || councilors.length === 0
+      ? {}
+      : {
+          councilOffNote:
+            `多模型共识至少要两家 —— 现在只配出了 ${councilors.length} 家(${councilors
+              .map((councilor) => councilor.id)
+              .join('、')})。` +
+            '在同一份 settings.json 的 providers 里再配一家,重开 hcode 就有这个工具了。',
+        }),
     rules: outcome.rules,
     system: [
       SYSTEM_PROMPT,
       renderInstructionsForModel(instructions),
       renderAgentRoster(agents.list()),
+      renderCouncilNote(councilors.map((councilor) => councilor.id)),
       renderSkillCatalog(skills.list()),
     ]
       .filter(Boolean)

@@ -4,6 +4,7 @@ import { createSession } from '../core/session.js';
 import type { LoopEvent } from '../core/loop.js';
 import { guardToolset, type PermissionRequest } from '../core/permission.js';
 import { expandAgentMention } from '../core/agents.js';
+import { expandCouncilMention } from '../core/council.js';
 import { createToolset } from '../core/toolset.js';
 import type { Tool } from '../core/tool.js';
 import type { Provider } from '../provider/types.js';
@@ -17,6 +18,13 @@ export type ReplOptions = {
   budget?: number;
   /** 可点名的角色名(@点名用)。不给就关闭 @ 展开。 */
   agentNames?: string[];
+  /**
+   * 开着 council 工具没有(v2-14)。开着才认 `@council` —— 能问的家不到两家
+   * 时工具压根不注册,这时认出 @council 反而是骗人。
+   */
+  council?: boolean;
+  /** council 没开时,`@council` 该收到的那句解释(由调用方按"为什么没开"写)。 */
+  councilOffNote?: string;
   /** 用户层的权限规则(settings.json 的 permissions)。 */
   rules?: readonly { pattern: string; verdict: 'allow' | 'ask' | 'deny' }[];
 };
@@ -123,11 +131,27 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
     if (text === '') return;
 
+    // @council:排在角色点名前面 —— council 不是角色(没有角色文件、不进花名册),
+    // 是主对话手上的一个工具,所以不归 expandAgentMention 管。
+    let outgoing = text;
+    if (options.council === true) {
+      const council = expandCouncilMention(text);
+      if (council.kind === 'empty') {
+        say(`\n${council.message}`);
+        return;
+      }
+      if (council.kind === 'mention') outgoing = council.text;
+    } else if (/^@council(?:\s|$)/i.test(outgoing)) {
+      // 只配出一家密钥时这个工具根本没注册。这时候按角色点名去报"没有名为 council
+      // 的角色",会把用户领到岔路上 —— 他要的是共识,不是名字打错了。
+      say(`\n${options.councilOffNote ?? '这次没有开多模型共识。'}`);
+      return;
+    }
+
     // @角色名:在发给模型之前先展开成"派某个角色去做"的明确指令。名字不认识
     // 就地报错、不发送 —— 静默当普通文本发出去,用户会以为点名生效了。
-    let outgoing = text;
-    if (options.agentNames && text.startsWith('@')) {
-      const expanded = expandAgentMention(text, options.agentNames);
+    if (options.agentNames && outgoing.startsWith('@')) {
+      const expanded = expandAgentMention(outgoing, options.agentNames);
       if (expanded.kind === 'unknown') {
         say(`
 ${expanded.message}`);

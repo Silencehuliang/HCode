@@ -52,3 +52,13 @@ export function estimateMessageTokens(messages: Message[]): number {
 
   return total;
 }
+
+/**
+ * 成本行上的写法:1000 以上折算成 k。
+ *
+ * 它只服务"让人一眼看出量级"这一个用途 —— 精确到个位数的估算值反而会让人以为
+ * 那是账单。见上面 estimateTokens 的说明。
+ */
+export function formatTokens(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
+}
