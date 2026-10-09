@@ -8,7 +8,7 @@ import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
 import { createSkillTool } from '../tools/skill.js';
-import { agentModelWarnings, agentRoots, discoverAgents } from '../core/agents.js';
+import { agentModelWarnings, agentRoots, discoverAgents, renderAgentRoster } from '../core/agents.js';
 import { loadConfig, skillRoots } from './config.js';
 import { loadInstructions, renderInstructionNote, renderInstructionsForModel } from './instructions.js';
 import { banner, platformRefusal } from './startup.js';
@@ -104,9 +104,11 @@ async function main(): Promise<number> {
   await startRepl({
     provider,
     tools: [...mainTools, task],
+    agentNames: agents.list().map((agent) => agent.name),
     system: [
       SYSTEM_PROMPT,
       renderInstructionsForModel(instructions),
+      renderAgentRoster(agents.list()),
       renderSkillCatalog(skills.list()),
     ]
       .filter(Boolean)

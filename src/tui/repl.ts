@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { createSession } from '../core/session.js';
 import type { LoopEvent } from '../core/loop.js';
 import { guardToolset, type PermissionRequest } from '../core/permission.js';
+import { expandAgentMention } from '../core/agents.js';
 import { createToolset } from '../core/toolset.js';
 import type { Tool } from '../core/tool.js';
 import type { Provider } from '../provider/types.js';
@@ -14,6 +15,8 @@ export type ReplOptions = {
   system: string;
   /** 上下文预算(约多少 token)。到了就压缩。 */
   budget?: number;
+  /** 可点名的角色名(@点名用)。不给就关闭 @ 展开。 */
+  agentNames?: string[];
 };
 
 const EXIT_COMMANDS = new Set(['/exit', '/quit', '/q']);
@@ -104,8 +107,21 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
     if (text === '') return;
 
+    // @角色名:在发给模型之前先展开成"派某个角色去做"的明确指令。名字不认识
+    // 就地报错、不发送 —— 静默当普通文本发出去,用户会以为点名生效了。
+    let outgoing = text;
+    if (options.agentNames && text.startsWith('@')) {
+      const expanded = expandAgentMention(text, options.agentNames);
+      if (expanded.kind === 'unknown') {
+        say(`
+${expanded.message}`);
+        return;
+      }
+      if (expanded.kind === 'mention') outgoing = expanded.text;
+    }
+
     try {
-      const result = await session.send(text);
+      const result = await session.send(outgoing);
 
       if (result.text) say(`\n${result.text}`);
       if (result.stoppedBecause === 'turn-limit') {

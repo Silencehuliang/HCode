@@ -144,6 +144,71 @@ async function readAgentFile(file: string, fallbackName: string, origin: string)
   return parseAgentText(text, fallbackName, origin, file);
 }
 
+/** 花名册里一条 description 的上限:超过就按字符截断。 */
+const ROSTER_DESCRIPTION_LIMIT = 40;
+
+/**
+ * 给系统提示用的角色花名册。
+ *
+ * 与 skill 目录同一套做法:只放名称与一句话说明,并**明说正文不在上下文里** ——
+ * 否则模型会以为它已经知道这个角色怎么做事了。description 截断到一行:条目的
+ * 长度是每轮都在付的税,角色一多,不立规矩就会失控。
+ */
+export function renderAgentRoster(agents: AgentDef[]): string {
+  if (agents.length === 0) return '';
+
+  const lines = agents.map((agent) => {
+    const desc =
+      agent.description.length > ROSTER_DESCRIPTION_LIMIT
+        ? `${agent.description.slice(0, ROSTER_DESCRIPTION_LIMIT - 1)}…`
+        : agent.description;
+    return `- ${agent.name}:${desc}`;
+  });
+
+  return [
+    '可派发的角色(用 task 工具按名派出去):',
+    ...lines,
+    '',
+    '什么时候派:这件事要翻很多地方、而你只需要结论时 —— 派出去,过程不占你的上下文。',
+    '派谁:按上面的说明挑最贴的那个;只读角色改不了文件,要动手的活别派给他们。',
+    '没把握该不该派、或只是顺手看一眼,自己做就行 —— 多派一次多花一次成本。',
+  ].join('\n');
+}
+
+/**
+ * 展开用户输入里的 `@角色名` 前缀。
+ *
+ * 纯函数,终端只负责把结果交给会话。名字不认识就报错并列出可用的 —— 静默
+ * 当成普通文本发出去,用户会以为点名生效了,而它其实只是一句闲聊。
+ */
+export function expandAgentMention(
+  line: string,
+  knownNames: readonly string[],
+): { kind: 'plain' } | { kind: 'mention'; text: string } | { kind: 'unknown'; message: string } {
+  const match = /^@([^\s@]+)\s*([\s\S]*)$/.exec(line.trim());
+  if (!match) return { kind: 'plain' };
+
+  const name = match[1]!;
+  const rest = match[2]!.trim();
+
+  if (!knownNames.includes(name)) {
+    return {
+      kind: 'unknown',
+      message:
+        knownNames.length === 0
+          ? `没有名为 ${name} 的角色 —— 一个角色都没有。放一个 .hcode/agents/<名>.md 就能定义。`
+          : `没有名为 ${name} 的角色。可用的是:${knownNames.join('、')}`,
+    };
+  }
+
+  return {
+    kind: 'mention',
+    text: rest === ''
+      ? `用 ${name} 角色处理下面的任务。`
+      : `用 ${name} 角色处理:${rest}`,
+  };
+}
+
 /**
  * 在根目录下发现角色。文件名(去 .md)即角色名来源;frontmatter 里的 name 优先。
  *

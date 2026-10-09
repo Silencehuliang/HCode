@@ -282,3 +282,70 @@ test('用户目录的同名文件同样能盖内置', async () => {
     await cleanup();
   }
 });
+
+// ---------- v2-05:花名册与 @点名 ----------
+
+import { expandAgentMention, renderAgentRoster } from './agents.js';
+
+test('花名册:一角色一行,带"何时派谁"的指引', () => {
+  const roster = renderAgentRoster([
+    { name: 'explorer', description: '只读探查', systemPrompt: 's', path: 'p', origin: 'o' },
+    { name: 'reviewer', description: '只读审查', systemPrompt: 's', path: 'p', origin: 'o' },
+  ]);
+
+  assert.match(roster, /- explorer:/);
+  assert.match(roster, /- reviewer:/);
+  assert.match(roster, /什么时候派/);
+  assert.match(roster, /派谁/);
+  // 一行一角色:条目行数 === 角色数(不含指引与空行)。
+  const entryLines = roster.split('\n').filter((l) => l.startsWith('- '));
+  assert.equal(entryLines.length, 2);
+});
+
+test('花名册:过长的 description 截断到一行', () => {
+  const long = '很长的说明'.repeat(20);
+  const roster = renderAgentRoster([
+    { name: 'x', description: long, systemPrompt: 's', path: 'p', origin: 'o' },
+  ]);
+  const entry = roster.split('\n').find((l) => l.startsWith('- x:'))!;
+  assert.ok(entry.length < 60, `条目不能失控地长。实际 ${entry.length} 字`);
+  assert.match(entry, /…$/);
+});
+
+test('花名册 token 增量有上限(≤ 30 字/角色)', () => {
+  const roster = renderAgentRoster([
+    { name: 'explorer', description: '只读探查,翻很多地方只带回结论', systemPrompt: 's', path: 'p', origin: 'o' },
+    { name: 'reviewer', description: '只读代码审查,给结论与关键文件路径', systemPrompt: 's', path: 'p', origin: 'o' },
+    { name: 'planner', description: '只读规划,产出步骤而不动任何文件', systemPrompt: 's', path: 'p', origin: 'o' },
+  ]);
+  const entryLines = roster.split('\n').filter((l) => l.startsWith('- '));
+  const avg = entryLines.reduce((sum, l) => sum + l.length, 0) / entryLines.length;
+  assert.ok(avg <= 30, `每条平均 ${avg.toFixed(1)} 字,超过 30 的规矩`);
+});
+
+test('expandAgentMention:@名 + 任务 → 明确指令', () => {
+  const out = expandAgentMention('@reviewer 帮我看看这段代码', ['reviewer', 'planner']);
+  assert.equal(out.kind, 'mention');
+  if (out.kind !== 'mention') return;
+  assert.match(out.text, /reviewer/);
+  assert.match(out.text, /帮我看看这段代码/);
+});
+
+test('expandAgentMention:光点名不带任务 → 仍然是指令', () => {
+  const out = expandAgentMention('@planner', ['planner']);
+  assert.equal(out.kind, 'mention');
+});
+
+test('expandAgentMention:不是 @ 开头 → 原样', () => {
+  assert.equal(expandAgentMention('普通一句话', ['reviewer']).kind, 'plain');
+  assert.equal(expandAgentMention('邮件 @ 我', ['reviewer']).kind, 'plain');
+});
+
+test('expandAgentMention:未知角色 → 报错并列出可用的', () => {
+  const out = expandAgentMention('@nobody 做点什么', ['reviewer', 'planner']);
+  assert.equal(out.kind, 'unknown');
+  if (out.kind !== 'unknown') return;
+  assert.match(out.message, /nobody/);
+  assert.match(out.message, /reviewer/);
+  assert.match(out.message, /planner/);
+});
