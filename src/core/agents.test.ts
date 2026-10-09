@@ -64,7 +64,8 @@ test('同名角色项目覆盖用户 —— first-wins', async () => {
     assert.strictEqual(explorer.description, '项目版');
     assert.strictEqual(explorer.systemPrompt, '项目正文');
     assert.strictEqual(explorer.origin, project);
-    assert.strictEqual(catalog.list().length, 1);
+    // 项目那份盖住用户那份与内置那份 —— 同名只留一个。
+    assert.strictEqual(catalog.list().filter((a) => a.name === 'explorer').length, 1);
   } finally {
     await cleanup();
   }
@@ -135,7 +136,11 @@ test('根目录不存在 → 静默跳过,目录里有非 md 文件 → 跳过',
 
     const catalog = await discoverAgents([project, join(project, '..', 'no-such-dir')]);
     assert.deepStrictEqual(catalog.problems(), []);
-    assert.deepStrictEqual(catalog.list(), []);
+    // 没有任何用户/项目角色时,目录里剩下的就是三个内置角色 —— 非 md 文件不进名录。
+    assert.deepStrictEqual(
+      catalog.list().map((a) => a.name).sort(),
+      ['explorer', 'planner', 'reviewer'],
+    );
   } finally {
     await cleanup();
   }
@@ -212,4 +217,68 @@ test('agentModelWarnings:指向配不出密钥的家才警告', () => {
   assert.match(warnings[0]!, /角色 b/);
   assert.match(warnings[0]!, /qwen/);
   assert.match(warnings[0]!, /回退/);
+});
+
+// ---------- v2-04:内置角色 ----------
+
+test('三个内置角色在没有用户/项目文件时可用,且都是只读', async () => {
+  const { project, cleanup } = await makeRoots();
+
+  try {
+    const catalog = await discoverAgents([project]);
+    assert.deepStrictEqual(catalog.problems(), []);
+
+    for (const name of ['explorer', 'reviewer', 'planner']) {
+      const def = catalog.get(name);
+      assert.ok(def, `内置角色 ${name} 必须在(开箱即用)`);
+      assert.equal(def.origin, '(内置)');
+      assert.ok(def.description.length > 0);
+      assert.equal(def.permission, 'read-only');
+      assert.deepStrictEqual(
+        def.tools,
+        ['read_file', 'search_content', 'find_files'],
+        `${name} 的声明工具集要与其只读定位一致`,
+      );
+    }
+
+    // explorer 的正文就是 V1 的子 agent 系统提示 —— 正名化迁移,不是另起一份。
+    assert.match(catalog.get('explorer')!.systemPrompt, /只读探查者/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('项目里的同名文件覆盖内置角色', async () => {
+  const { project, cleanup } = await makeRoots();
+
+  try {
+    await writeFile(join(project, 'planner.md'), agentFile('description: 我的规划师', '改过的正文'));
+
+    const catalog = await discoverAgents([project]);
+    const planner = catalog.get('planner');
+    assert.ok(planner);
+    assert.equal(planner.description, '我的规划师');
+    assert.equal(planner.systemPrompt, '改过的正文');
+    assert.notEqual(planner.origin, '(内置)');
+    // 盖掉之后仍然只有一个 planner。
+    assert.strictEqual(catalog.list().filter((a) => a.name === 'planner').length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('用户目录的同名文件同样能盖内置', async () => {
+  const { project, user, cleanup } = await makeRoots();
+
+  try {
+    await writeFile(join(user, 'reviewer.md'), agentFile('description: 用户版审查员', '用户正文'));
+
+    const catalog = await discoverAgents([project, user]);
+    const reviewer = catalog.get('reviewer');
+    assert.ok(reviewer);
+    assert.equal(reviewer.description, '用户版审查员');
+    assert.equal(reviewer.origin, user);
+  } finally {
+    await cleanup();
+  }
 });

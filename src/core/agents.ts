@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { parseFrontmatter } from './skills.js';
+import { BUILTIN_AGENT_DEFS, BUILTIN_AGENT_ORIGIN } from './builtin-agents.js';
 
 /**
  * 一个角色 = 一份 md 文件。
@@ -103,21 +104,19 @@ function parseTools(raw: string): string[] {
     .filter(Boolean);
 }
 
-async function readAgentFile(file: string, fallbackName: string, origin: string): Promise<AgentDef | string> {
-  // 去 BOM,同一套读法:PowerShell 5.1 与记事本都会写它,Windows 用户按教程写
-  // 配置文件,撞上的就是它。不去掉的话 /^---/ 匹配不上,整份文件被判成"没有 frontmatter"。
-  const text = (await readFile(file, 'utf8')).replace(/^﻿/, '');
+/** 解析一份角色文本(文件读出来或内置嵌入的,同一套契约)。 */
+export function parseAgentText(text: string, fallbackName: string, origin: string, path: string): AgentDef | string {
   const parsed = parseFrontmatter(text);
 
   if (!parsed) {
-    return `${file}:开头没有 frontmatter。角色文件需要以 --- 开头,并在里面写明 name 与 description。`;
+    return `${path}:开头没有 frontmatter。角色文件需要以 --- 开头,并在里面写明 name 与 description。`;
   }
 
   const name = parsed.meta.get('name') ?? fallbackName;
   const description = parsed.meta.get('description');
 
   if (!description) {
-    return `${file}:frontmatter 里没有 description。一句话说明是花名册派发的依据 —— 没有它,主对话不知道什么时候该派这个角色。`;
+    return `${path}:frontmatter 里没有 description。一句话说明是花名册派发的依据 —— 没有它,主对话不知道什么时候该派这个角色。`;
   }
 
   // 5 字段之外一律忽略:不报错(它可能是为别家 harness 写的),但也不生效。
@@ -133,9 +132,16 @@ async function readAgentFile(file: string, fallbackName: string, origin: string)
     ...(toolsRaw !== undefined ? { tools: parseTools(toolsRaw) } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(permission !== undefined ? { permission } : {}),
-    path: file,
+    path,
     origin,
   };
+}
+
+async function readAgentFile(file: string, fallbackName: string, origin: string): Promise<AgentDef | string> {
+  // 去 BOM,同一套读法:PowerShell 5.1 与记事本都会写它,Windows 用户按教程写
+  // 配置文件,撞上的就是它。不去掉的话 /^---/ 匹配不上,整份文件被判成"没有 frontmatter"。
+  const text = (await readFile(file, 'utf8')).replace(/^﻿/, '');
+  return parseAgentText(text, fallbackName, origin, file);
 }
 
 /**
@@ -179,6 +185,22 @@ export async function discoverAgents(roots: string[]): Promise<AgentCatalog> {
       seen.add(outcome.name);
       agents.push(outcome);
     }
+  }
+
+  // 内置角色垫底:项目/用户目录里有同名的,前面已经收进来,这里自然被跳过。
+  // 它们走的是和文件角色**同一个解析器** —— 内置那份解析出错会是内置的错,
+  // 在测试里当场暴露,而不是留到运行时成一个哑掉的角色。
+  for (const [index, raw] of BUILTIN_AGENT_DEFS.entries()) {
+    const builtin = parseAgentText(raw, `(内置 ${index})`, BUILTIN_AGENT_ORIGIN, `${BUILTIN_AGENT_ORIGIN}#${index}`);
+    if (typeof builtin === 'string') {
+      // 内置定义是我们自己写的,出错说明发布包坏了。记进 problems 让它可见,
+      // 但它是内置的错,不该让用户以为是自己配错了。
+      problems.push(`内置角色定义有问题 —— ${builtin}`);
+      continue;
+    }
+    if (seen.has(builtin.name)) continue;
+    seen.add(builtin.name);
+    agents.push(builtin);
   }
 
   return {
