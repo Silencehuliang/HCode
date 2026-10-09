@@ -156,3 +156,120 @@ test('危险命令被拦下,工具不执行,原因与替代做法一起回给模
   assert.match(output, /删除|递归/, '原因要一起回传');
   assert.ok(output.length > 40, `还要带上替代做法,否则模型只会原地重试。实际:${output}`);
 });
+
+// ---------- v2-02:角色层单向收紧 ----------
+
+import {
+  decideAsAgent,
+  isZeroBlastRadius,
+  parseAgentRestriction,
+  tighten,
+  guardToolsetForAgent,
+} from './permission.js';
+
+test('tighten:两个判定永远取更严者(组合矩阵)', () => {
+  const allow = { kind: 'allow' } as const;
+  const ask = { kind: 'ask' } as const;
+  const deny = { kind: 'deny', reason: 'r', instead: 'i' } as const;
+
+  // deny 在任何一边都赢 —— 这就是 DANGER_RULES 最终否决权的实现机制。
+  assert.equal(tighten(allow, deny).kind, 'deny');
+  assert.equal(tighten(deny, allow).kind, 'deny');
+  assert.equal(tighten(deny, deny).kind, 'deny');
+  assert.equal(tighten(ask, deny).kind, 'deny');
+  assert.equal(tighten(deny, ask).kind, 'deny');
+  // ask 压得过 allow:用户层的把关不归角色文件点头。
+  assert.equal(tighten(allow, ask).kind, 'ask');
+  assert.equal(tighten(ask, allow).kind, 'ask');
+  assert.equal(tighten(ask, ask).kind, 'ask');
+  assert.equal(tighten(allow, allow).kind, 'allow');
+});
+
+test('read-only 角色:写盘与执行命令直接 deny,零爆炸半径工具照常放行', () => {
+  assert.equal(decideAsAgent(call('write_file', { path: 'a.txt' }), 'read-only').kind, 'deny');
+  assert.equal(decideAsAgent(call('edit_file', { path: 'a.ts' }), 'read-only').kind, 'deny');
+  assert.equal(decideAsAgent(call('run_command', { command: 'Get-ChildItem' }), 'read-only').kind, 'deny');
+  assert.equal(decideAsAgent(call('read_file', { path: 'a.txt' }), 'read-only').kind, 'allow');
+  assert.equal(decideAsAgent(call('search_content', {}), 'read-only').kind, 'allow');
+});
+
+test('DANGER_RULES 在角色层叠加下仍然是 deny,任何方向都改不动', () => {
+  // 危险命令:V1 判定就是 deny;read-only 叠上去还是同一条 deny。
+  const verdict = decideAsAgent(
+    call('run_command', { command: 'Remove-Item -Recurse -Force .\build' }),
+    'read-only',
+  );
+  assert.equal(verdict.kind, 'deny');
+  if (verdict.kind === 'deny') {
+    assert.match(verdict.reason, /递归删除/, 'deny 的理由要来自危险清单,不是角色层');
+  }
+});
+
+test('用户层 ask 不能被任何角色声明放宽(单向)', () => {
+  // 用户层对 write_file 是 ask;角色层能给的只有 read-only(更严)。没有"角色 allow"
+  // 这种东西可测 —— 语法里就不存在,这是设计而不是实现细节(v2-08 也一样)。
+  assert.equal(decideAsAgent(call('write_file', { path: 'a.txt' })).kind, 'ask');
+  assert.equal(decideAsAgent(call('write_file', { path: 'a.txt' }), 'read-only').kind, 'deny');
+});
+
+test('parseAgentRestriction:只认 read-only,别的值不生效也不报错', () => {
+  assert.equal(parseAgentRestriction('read-only'), 'read-only');
+  assert.equal(parseAgentRestriction(' read-only '), 'read-only');
+  assert.equal(parseAgentRestriction('allow-all'), undefined);
+  assert.equal(parseAgentRestriction('god-mode'), undefined);
+  assert.equal(parseAgentRestriction(undefined), undefined);
+});
+
+test('guardToolsetForAgent:角色层 deny 不问用户,直接拦', async () => {
+  let asked = 0;
+  const inner = createToolset([
+    {
+      spec: { name: 'write_file', description: '写', inputSchema: { type: 'object' } },
+      async run() { return '写进去了'; },
+    },
+  ]);
+  const guarded = guardToolsetForAgent(inner, {
+    approve: async () => { asked += 1; return true; },
+    restriction: 'read-only',
+  });
+
+  const output = await guarded.run({ id: 'c1', name: 'write_file', input: { path: 'a.txt' } });
+  assert.match(output, /read-only/);
+  assert.equal(asked, 0, '角色层 deny 是角色作者替用户收的权,不该再问现场用户');
+});
+
+test('guardToolsetForAgent:无角色层时 ask 照常走用户确认', async () => {
+  let asked = 0;
+  const inner = createToolset([
+    {
+      spec: { name: 'write_file', description: '写', inputSchema: { type: 'object' } },
+      async run() { return '写进去了'; },
+    },
+  ]);
+  const guarded = guardToolsetForAgent(inner, {
+    approve: async () => { asked += 1; return false; },
+  });
+
+  const output = await guarded.run({ id: 'c1', name: 'write_file', input: { path: 'a.txt' } });
+  assert.match(output, /没有批准/);
+  assert.equal(asked, 1);
+});
+
+test('guardToolset(V1 入口)行为不变:ask 拦下、allow 放行', async () => {
+  const inner = createToolset([
+    {
+      spec: { name: 'read_file', description: '读', inputSchema: { type: 'object' } },
+      async run() { return '内容'; },
+    },
+  ]);
+  const guarded = guardToolset(inner, { approve: async () => false });
+  assert.equal(await guarded.run({ id: 'c1', name: 'read_file', input: {} }), '内容');
+});
+
+test('isZeroBlastRadius:判据与装配层共用同一份名单', () => {
+  assert.ok(isZeroBlastRadius('read_file'));
+  assert.ok(isZeroBlastRadius('todo_write'));
+  assert.ok(!isZeroBlastRadius('write_file'));
+  assert.ok(!isZeroBlastRadius('run_command'));
+  assert.ok(!isZeroBlastRadius('edit_file'));
+});

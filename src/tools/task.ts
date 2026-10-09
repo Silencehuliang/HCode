@@ -2,6 +2,8 @@ import type { Tool } from '../core/tool.js';
 import type { AgentCatalog, AgentDef } from '../core/agents.js';
 import { runSubagent } from '../core/subagent.js';
 import { createToolset } from '../core/toolset.js';
+import { guardToolsetForAgent, isZeroBlastRadius, parseAgentRestriction } from '../core/permission.js';
+import type { AgentRestriction } from '../core/permission.js';
 import type { Provider } from '../provider/types.js';
 
 function asText(value: unknown, what: string): string {
@@ -33,7 +35,7 @@ export type TaskDeps = {
 export function resolveAgentRun(
   deps: TaskDeps,
   name: string,
-): { system: string; tools: Tool[]; def: AgentDef } | { error: string } {
+): { system: string; tools: Tool[]; def: AgentDef; restriction?: AgentRestriction } | { error: string } {
   if (!deps.agents) {
     return { error: `没有名为 ${name} 的角色:这个会话没有启用角色目录。` };
   }
@@ -67,7 +69,15 @@ export function resolveAgentRun(
     tools = (deps.allTools ?? deps.tools).filter((tool) => tool.spec.name !== 'task');
   }
 
-  return { system: def.systemPrompt, tools, def };
+  // read-only 在装配层就剥掉写作/执行类工具:模型看不见,比运行时拦干净 ——
+  // 它不会一轮轮白试 write_file 再被拒。这不是安全边界(那在 guardToolsetForAgent),
+  // 是省掉注定失败的尝试。
+  const restriction = parseAgentRestriction(def.permission);
+  const visible = restriction === 'read-only'
+    ? tools.filter((tool) => isZeroBlastRadius(tool.spec.name))
+    : tools;
+
+  return { system: def.systemPrompt, tools: visible, def, ...(restriction ? { restriction } : {}) };
 }
 
 /**
@@ -125,6 +135,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
 
       let system = deps.system;
       let tools = deps.tools;
+      let restriction: AgentRestriction | undefined;
 
       if (typeof agent === 'string' && agent.trim() !== '') {
         const resolved = resolveAgentRun(deps, agent.trim());
@@ -133,6 +144,7 @@ export function createTaskTool(deps: TaskDeps): Tool {
         }
         system = resolved.system;
         tools = resolved.tools;
+        restriction = resolved.restriction;
       }
 
       // context 拼在 prompt 前面 —— 委派 prompt 是子 agent 唯一的入向通道,
@@ -142,11 +154,19 @@ export function createTaskTool(deps: TaskDeps): Tool {
           ? `背景:\n${background.trim()}\n\n任务:\n${body}`
           : body;
 
+      // 子 agent 的工具集必须过守门:角色可以继承主对话全量工具,不过这一层
+      // 它就是一台没有守门的 Remove-Item 机器。approve 从 ToolContext 递来的
+      // 是终端的确认通道;没有它(比如单测里)就一路 ask 下去,不会误放行。
+      const guarded = guardToolsetForAgent(createToolset(tools), {
+        approve: context?.approve ?? (async () => false),
+        ...(restriction !== undefined ? { restriction } : {}),
+      });
+
       try {
         return await runSubagent(
           {
             provider: deps.provider,
-            tools: createToolset(tools),
+            tools: guarded,
             system,
             ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
           },

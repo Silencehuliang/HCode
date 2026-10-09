@@ -8,6 +8,12 @@ import type { ToolSpec } from '../provider/types.js';
  */
 export type ToolContext = {
   signal?: AbortSignal;
+  /**
+   * 权限确认通道,由守门层注入(见 permission.ts)。工具自己不读它 —— 它是给
+   * task 这类"内部还会再跑一层工具"的工具用的:派出去的子 agent 也要过同一道
+   * 权限门,而终端在主界面手上,只能从这里递过去。
+   */
+  approve?: (request: { tool: string; input: unknown }) => Promise<boolean>;
 };
 
 /**

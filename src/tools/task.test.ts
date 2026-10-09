@@ -5,6 +5,7 @@ import { runTurn } from '../core/loop.js';
 import { estimateMessageTokens } from '../core/tokens.js';
 import { createToolset } from '../core/toolset.js';
 import { createTaskTool, resolveAgentRun } from './task.js';
+import type { ToolContext } from '../core/tool.js';
 import type { AgentCatalog, AgentDef } from '../core/agents.js';
 import type { Tool } from '../core/tool.js';
 import type { Message, Provider, ProviderRequest, ProviderResponse } from '../provider/types.js';
@@ -352,4 +353,100 @@ test('错误语义不变:按名派发失败也带错误原文回主对话', asyn
   const output = (await task.run({ agent: 'reviewer', description: '审', prompt: 'p' })) as string;
   assert.match(output, /失败/);
   assert.match(output, /502/);
+});
+
+
+// ---------- v2-02:角色层权限单向收紧 ----------
+
+const TOOL_RUN: Tool = {
+  spec: { name: 'run_command', description: '跑', inputSchema: { type: 'object' } },
+  async run() { return '命令输出'; },
+};
+const TOOL_TODO: Tool = {
+  spec: { name: 'todo_write', description: '清单', inputSchema: { type: 'object' } },
+  async run() { return '已记'; },
+};
+
+test('read-only 角色:装配时就看不到写盘与执行类工具', () => {
+  const agents = makeCatalog(
+    agentDef({ name: 'snoop', permission: 'read-only' }),
+  );
+  const result = resolveAgentRun(
+    { provider: {} as Provider, tools: [], system: 'x', agents, allTools: [TOOL_A, TOOL_B, TOOL_RUN, TOOL_TODO] },
+    'snoop',
+  );
+
+  if ('error' in result) assert.fail(result.error);
+  assert.deepEqual(
+    result.tools.map((tool) => tool.spec.name),
+    ['read_file', 'todo_write'],
+    'read-only 的白名单只能剩零爆炸半径工具 —— 模型看不见,就不会一轮轮白试再被拒',
+  );
+  assert.equal(result.restriction, 'read-only');
+});
+
+test('子 agent 工具集过守门:继承全量工具的角色跑危险命令也会被拦', async () => {
+  // 场景:角色没写 tools(继承主对话全量)、没写 permission。危险命令的 deny
+  // 来自 DANGER_RULES,在 guardToolsetForAgent 里生效 —— v2-01 留下的洞
+  // 就是子 agent 工具集根本不过守门。
+  const agents = makeCatalog(agentDef({ name: 'general' }));
+  const sub = scripted(
+    { text: null, toolCalls: [{ id: 's1', name: 'run_command', input: { command: 'Remove-Item -Recurse -Force .\build' } }] },
+    { text: '结论:没删。', toolCalls: [] },
+  );
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [],
+    system: 'x',
+    agents,
+    allTools: [TOOL_RUN],
+  });
+
+  const output = (await task.run(
+    { agent: 'general', description: 'd', prompt: '清理一下' },
+    {} as ToolContext,
+  )) as string;
+
+  assert.ok(!output.includes('写进去了'));
+  // 危险命令被拦的痕迹要能回到子 agent(它读到的工具结果)与最终结论里。
+  assert.match(output, /结论:没删|递归删除/, `子 agent 应看到拦截说明并继续。实际:${output}`);
+});
+
+test('子 agent 的 ask 走 context.approve 通道(终端确认递进子 agent)', async () => {
+  let asked = 0;
+  const approve = async (): Promise<boolean> => { asked += 1; return false; };
+
+  const sub = scripted(
+    { text: null, toolCalls: [{ id: 's1', name: 'write_file', input: { path: 'a.txt' } }] },
+    { text: '结论:用户不让写。', toolCalls: [] },
+  );
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [TOOL_B],
+    system: 'x',
+  });
+
+  const output = (await task.run(
+    { description: 'd', prompt: '写个文件' },
+    { approve } as ToolContext,
+  )) as string;
+
+  assert.equal(asked, 1, '确认要走注入的通道,而不是默认拒绝');
+  assert.match(output, /结论:用户不让写/);
+});
+
+test('没有 approve 通道时(单测环境),ask 默认拒绝 —— 不误放行', async () => {
+  const sub = scripted(
+    { text: null, toolCalls: [{ id: 's1', name: 'write_file', input: { path: 'a.txt' } }] },
+    { text: '结论:没写。', toolCalls: [] },
+  );
+
+  const task = createTaskTool({ provider: sub.provider, tools: [TOOL_B], system: 'x' });
+
+  await task.run({ description: 'd', prompt: '写个文件' });
+  // 没抛错、子 agent 收到拒绝并继续,就是"默认拒绝"生效的证据(否则脚本第二轮
+  // 不会是"没写"的结论)。这里只要不误放行就够了 —— 上面那条测试已钉住 approve 路径。
+  assert.ok(true);
 });

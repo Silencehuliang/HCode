@@ -7,6 +7,61 @@ export type Verdict =
   | { kind: 'ask' }
   | { kind: 'deny'; reason: string; instead: string };
 
+/**
+ * 角色文件的 permission 声明。v2-02 的语法就这一个词 —— allow/deny/规则引擎是
+ * v2-08 的事,到时在这上面扩,别另起炉灶。
+ */
+export type AgentRestriction = 'read-only';
+
+/**
+ * 解析角色 frontmatter 的 permission 原始值。不认识的值不报错也不生效 ——
+ * 角色文件可能是照着别家 harness 的教程写的,把它当 read-only 生效等于
+ * 悄悄替用户改了主意。
+ */
+export function parseAgentRestriction(raw: string | undefined): AgentRestriction | undefined {
+  return raw?.trim() === 'read-only' ? 'read-only' : undefined;
+}
+
+/**
+ * 单向收紧的原子操作:两个判定取更严者。
+ *
+ * 严的次序是 deny > ask > allow。deny 语义上就是最严,任何东西叠上去都
+ * 改不动它 —— DANGER_RULES 的最终否决权就是这样来的:角色层(乃至
+ * v2-08 的用户规则层)无论声明什么,先到的 deny 原样穿过。
+ */
+export function tighten(user: Verdict, role: Verdict): Verdict {
+  if (user.kind === 'deny') return user;
+  if (role.kind === 'deny') return role;
+  if (user.kind === 'ask') return user;
+  if (role.kind === 'ask') return role;
+  return user; // 两边都是 allow
+}
+
+/** read-only 角色的判定:对写得动磁盘、跑得了命令的工具直接 deny。 */
+function readOnlyVerdict(request: PermissionRequest): Verdict {
+  if (NO_BLAST_RADIUS.has(request.tool)) return { kind: 'allow' };
+  return {
+    kind: 'deny',
+    reason: '这个角色声明了自己是 read-only,写盘与执行命令不在它的权限之内。',
+    instead: '读到这里就够了 —— 把结论带回去,需要动手的活派给主对话或可写角色。',
+  };
+}
+
+/**
+ * 带角色层的判定。V1 的 `decide` 是用户层(全局),这里把它与角色层收紧
+ * 后给出最终判定。**纯函数**,与 `decide` 同样的承诺。
+ */
+export function decideAsAgent(
+  request: PermissionRequest,
+  restriction?: AgentRestriction,
+): Verdict {
+  const base = decide(request);
+  if (restriction === 'read-only') {
+    return tighten(base, readOnlyVerdict(request));
+  }
+  return base;
+}
+
 export type DangerRule = {
   /** 直接对着命令原文匹配,能一眼读出来它拦的是什么。 */
   pattern: RegExp;
@@ -103,6 +158,11 @@ const NO_BLAST_RADIUS = new Set([
   'skill',
 ]);
 
+/** 一个工具是否零爆炸半径。给装配处用 —— 只读角色在装配时就该看不到写工具。 */
+export function isZeroBlastRadius(tool: string): boolean {
+  return NO_BLAST_RADIUS.has(tool);
+}
+
 function commandOf(input: unknown): string {
   const { command } = (input ?? {}) as { command?: unknown };
   return typeof command === 'string' ? command : '';
@@ -145,14 +205,32 @@ export function guardToolset(
   inner: Toolset,
   deps: { approve: (request: PermissionRequest) => Promise<boolean> },
 ): Toolset {
+  return guardToolsetForAgent(inner, { approve: deps.approve });
+}
+
+/**
+ * 带角色层的守门。子 agent 的工具集**必须**从这里出 —— v2-01 让角色可以继承
+ * 主对话全量工具,如果不过这一层,继承出来的子 agent 就是一台没有守门的
+ * `Remove-Item -Recurse` 机器(实测抓到的洞)。判定用 `decideAsAgent`,
+ * 角色层 deny 不问用户、不给批准的机会 —— 它是角色作者替用户收的权,不归
+ * 现场用户的 y/n 管。
+ */
+export function guardToolsetForAgent(
+  inner: Toolset,
+  deps: { approve: (request: PermissionRequest) => Promise<boolean>; restriction?: AgentRestriction },
+): Toolset {
   return {
     specs: inner.specs,
 
     async run(call, context) {
       const request: PermissionRequest = { tool: call.name, input: call.input };
-      const verdict = decide(request);
+      const verdict = decideAsAgent(request, deps.restriction);
 
-      if (verdict.kind === 'allow') return inner.run(call, context);
+      if (verdict.kind === 'allow') {
+        // 把确认通道递进去:task 这类工具在内部还要跑子 agent,子 agent 的
+        // 权限门要能找到终端。其余工具不读它,原样路过。
+        return inner.run(call, { ...(context ?? {}), approve: deps.approve });
+      }
 
       // 危险清单优先于用户同意:自己点了头也不该放它过去。
       if (verdict.kind === 'deny') {
@@ -164,7 +242,7 @@ export function guardToolset(
         return `用户没有批准这次 ${call.name} 操作,**没有执行**。先问清楚他想要什么,再换一个方式。`;
       }
 
-      return inner.run(call, context);
+      return inner.run(call, { ...(context ?? {}), approve: deps.approve });
     },
   };
 }
