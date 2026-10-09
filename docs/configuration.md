@@ -78,6 +78,31 @@ hcode 会在启动时检查,直接告诉你**是第几个字符**出了问题,�
 
 `proxy` 为什么按家配:用国产模型的人多半不需要代理,要用 Claude 的人多半必须用。做成全局的话,要么逼前者也配一个,要么更糟 —— 让国产模型的请求也绕一圈到国外代理去。
 
+## 角色文件(agents)
+
+一个角色就是一份 Markdown:`frontmatter` 写它怎么被装配,正文就是它的 system prompt。放在两处,先找到的先赢:
+
+1. `<项目>/.hcode/agents/<名字>.md`
+2. `%USERPROFILE%\.hcode\agents\<名字>.md`
+
+同名时项目里的那份赢 —— 所以「这个项目专用」和「我所有项目都用」是同一套写法。**不读 `.claude/agents`**:那边 `tools` 的取值域和 `permission` 的语义是别家的方言,错位兼容比不兼容更糟(理由见 [ADR-0007](adr/0007-agents-as-markdown.md))。frontmatter 里不认识的键忽略、不报错;`description` 缺了会在启动时列为一条问题。
+
+| 字段 | 不填时 | 说明 |
+| --- | --- | --- |
+| `name` | 文件名 | 点名派发用的名字 |
+| `description` | 无 | 花名册靠它做自动派发;缺了算是问题 |
+| (正文) | 空 | 这个角色的 system prompt |
+| `tools` | 继承主对话的全部工具(剥掉 `task`) | 逗号或换行分隔;写了不存在的工具名直接报错,不静默过滤 |
+| `model` | 主对话那家 | `glm` / `deepseek:glm-5.3` / `preset:快` 三种写法 |
+| `permission` | 全局那套 | 目前只认 `read-only`,只收紧不放宽 |
+| `spawns` | 它不能再派 | 允许再派给哪些角色(默认最多两层) |
+| `output` | 自由文本 | 结论必须带的字段;两次没带就把原文连同错误退回主对话 |
+| `worktree` | 关 | `true` = 在独立 git worktree 里干活,结果留在自己的分支上 |
+
+`worktree` 是唯一一个**值写错就报错**的字段:`true/false` 之外的东西一律拒绝启动,因为「用户以为在车道上、其实子 agent 在改他的工作区」是最坏的错法。其余字段写错最坏是没生效。
+
+怎么派它们出去(自动 / `@点名` / 后台 / 并行 / Council)写在 [README.zh.md](../README.zh.md) 的多角色一节。
+
 ## 工具权限(permissions)
 
 默认行为是:**只读工具直接放行,写文件先问,PowerShell 命令默认执行但被一份危险清单拦住**。要在默认之上收紧或放宽,用 `permissions`:
