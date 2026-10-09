@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { runTurn } from '../core/loop.js';
 import { estimateMessageTokens } from '../core/tokens.js';
 import { createToolset } from '../core/toolset.js';
-import { createTaskTool } from './task.js';
+import { createTaskTool, resolveAgentRun } from './task.js';
+import type { AgentCatalog, AgentDef } from '../core/agents.js';
 import type { Tool } from '../core/tool.js';
 import type { Message, Provider, ProviderRequest, ProviderResponse } from '../provider/types.js';
 
@@ -191,3 +192,164 @@ test('轮次用尽时给出可操作的说明,而不是一句空结论', async (
   assert.ok(output.length > 10, '不能是空字符串 —— 那和静默失败没区别');
 });
 
+
+// ---------- v2-01:按名派发角色 ----------
+
+function makeCatalog(...defs: AgentDef[]): AgentCatalog {
+  return {
+    list: () => defs.map((def) => ({ ...def })),
+    get: (name) => {
+      const found = defs.find((def) => def.name === name);
+      return found ? { ...found } : undefined;
+    },
+    problems: () => [],
+  };
+}
+
+function agentDef(overrides: Partial<AgentDef> & { name: string }): AgentDef {
+  return {
+    description: '测试角色',
+    systemPrompt: '角色提示',
+    path: '/virtual/test.md',
+    origin: '/virtual',
+    ...overrides,
+  };
+}
+
+const TOOL_A: Tool = {
+  spec: { name: 'read_file', description: '读', inputSchema: { type: 'object' } },
+  async run() { return ''; },
+};
+const TOOL_B: Tool = {
+  spec: { name: 'write_file', description: '写', inputSchema: { type: 'object' } },
+  async run() { return ''; },
+};
+const TOOL_TASK: Tool = {
+  spec: { name: 'task', description: '派', inputSchema: { type: 'object' } },
+  async run() { return ''; },
+};
+
+test('按名派发:装配出该角色的系统提示与工具集', async () => {
+  const sub = scripted({ text: '角色结论', toolCalls: [] });
+  const agents = makeCatalog(
+    agentDef({ name: 'reviewer', systemPrompt: '你是审查员。', tools: ['read_file'] }),
+  );
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [],
+    system: '缺省提示',
+    agents,
+    allTools: [TOOL_A, TOOL_B],
+  });
+
+  await task.run({ agent: 'reviewer', description: '审', prompt: '看看' });
+
+  assert.equal(sub.requests[0]!.system, '你是审查员。', '系统提示来自角色文件');
+  assert.deepEqual(
+    sub.requests[0]!.tools.map((tool) => tool.name),
+    ['read_file'],
+    '工具集按白名单装配',
+  );
+});
+
+test('不传 agent 时行为与 V1 逐项一致(缺省探查者)', async () => {
+  const sub = scripted({ text: '结论', toolCalls: [] });
+
+  const task = createTaskTool({
+    provider: sub.provider,
+    tools: [TOOL_A],
+    system: '缺省提示',
+    agents: makeCatalog(agentDef({ name: 'reviewer' })),
+  });
+
+  await task.run({ description: '查', prompt: '查一下' });
+
+  assert.equal(sub.requests[0]!.system, '缺省提示');
+  assert.deepEqual(
+    sub.requests[0]!.tools.map((tool) => tool.name),
+    ['read_file'],
+  );
+});
+
+test('角色白名单里的工具名不存在 → 可读的错误', () => {
+  const result = resolveAgentRun(
+    {
+      provider: {} as Provider,
+      tools: [],
+      system: 'x',
+      agents: makeCatalog(agentDef({ name: 'broken', tools: ['no_such_tool'] })),
+      allTools: [TOOL_A],
+    },
+    'broken',
+  );
+
+  if (!('error' in result)) assert.fail('应该返回 error');
+  assert.match(result.error, /不存在的工具|工具不存在/);
+  assert.match(result.error, /no_such_tool/, '要把不存在的名字列出来');
+});
+
+test('角色没写 tools → 继承主对话全量工具但剥掉 task 自己', () => {
+  const agents = makeCatalog(agentDef({ name: 'general' }));
+  const result = resolveAgentRun({
+    provider: {} as Provider,
+    tools: [],
+    system: 'x',
+    agents,
+    allTools: [TOOL_A, TOOL_TASK, TOOL_B],
+  }, 'general');
+
+  if ('error' in result) assert.fail(result.error);
+  assert.deepEqual(
+    result.tools.map((tool) => tool.spec.name),
+    ['read_file', 'write_file'],
+    'task 必须被剥掉 —— 递归派发是 v2-09 的议题,现在套娃没有任何一层拦得住',
+  );
+});
+
+test('派不存在的角色 → 错误列出可用角色', async () => {
+  const agents = makeCatalog(agentDef({ name: 'reviewer' }), agentDef({ name: 'explorer' }));
+  const sub = scripted();
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  const output = (await task.run({ agent: 'nope', description: 'd', prompt: 'p' })) as string;
+  assert.match(output, /没有名为 nope 的角色/);
+  assert.match(output, /reviewer/);
+  assert.match(output, /explorer/);
+  assert.equal(sub.requests.length, 0, '装配失败不该真的派出去');
+});
+
+test('context 拼在任务前,背景与任务分开', async () => {
+  const sub = scripted({ text: '结论', toolCalls: [] });
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x' });
+
+  await task.run({
+    description: 'd',
+    prompt: '找出所有调用点',
+    context: '这是一个 PowerShell-only 的仓库',
+  });
+
+  const first = sub.requests[0]!.messages[0]! as { role: string; text?: string };
+  const text = first.text ?? '';
+  assert.match(text, /背景:/);
+  assert.match(text, /任务:/);
+  assert.match(text, /PowerShell-only/);
+  // 没传 context 的旧路径不受影响。
+  await task.run({ description: 'd', prompt: '裸任务' });
+  const second = sub.requests[1]!.messages[0]! as { role: string; text?: string };
+  const bare = second.text ?? '';
+  assert.equal(bare, '裸任务');
+});
+
+test('错误语义不变:按名派发失败也带错误原文回主对话', async () => {
+  const sub = scripted(new Error('DeepSeek 接口返回 HTTP 502:bad gateway'));
+  const agents = makeCatalog(agentDef({ name: 'reviewer', model: 'deepseek' }));
+
+  const task = createTaskTool({ provider: sub.provider, tools: [], system: 'x', agents });
+
+  const output = (await task.run({ agent: 'reviewer', description: '审', prompt: 'p' })) as string;
+  assert.match(output, /失败/);
+  assert.match(output, /502/);
+});

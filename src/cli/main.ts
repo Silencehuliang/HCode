@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { SUBAGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../core/system-prompt.js';
 import { createProvider } from '../provider/index.js';
-import { createExplorerTools, createTools } from '../tools/index.js';
+import { createTools, createExplorerTools } from '../tools/index.js';
 import { createTaskTool } from '../tools/task.js';
 import { createTodoStore } from '../core/todos.js';
 import { startRepl } from '../tui/repl.js';
 import { discoverSkills, renderSkillCatalog } from '../core/skills.js';
 import { createSkillTool } from '../tools/skill.js';
+import { agentRoots, discoverAgents } from '../core/agents.js';
 import { loadConfig, skillRoots } from './config.js';
 import { loadInstructions, renderInstructionNote, renderInstructionsForModel } from './instructions.js';
 import { banner, platformRefusal } from './startup.js';
@@ -60,18 +61,28 @@ async function main(): Promise<number> {
     process.stderr.write(`skill 读不出来 —— ${problem}\n`);
   }
 
-  // 子 agent 拿的是只读工具(createExplorerTools),不是主对话那一整套 ——
-  // 它被派出去的用途是"帮我查清楚",不是"帮我改掉"。
+  // 角色与 skill 同一待遇:目录不存在是正常,文件读不懂必须说。
+  const agents = await discoverAgents(agentRoots());
+  for (const problem of agents.problems()) {
+    process.stderr.write(`角色文件读不出来 —— ${problem}\n`);
+  }
+
+  // task 不传 agent 参数时的缺省行为:派只读探查者(V1 行为,向后兼容)。
+  // 主对话全量工具传给 task 作白名单取材范围;白名单缺省(角色没写 tools)
+  // 时继承它但剥掉 task 自己。
+  const mainTools = [...createTools({ todos }), createSkillTool(skills)];
   const task = createTaskTool({
     provider,
     tools: createExplorerTools(),
     system: SUBAGENT_SYSTEM_PROMPT,
     maxTurns: SUBAGENT_MAX_TURNS,
+    agents,
+    allTools: mainTools,
   });
 
   await startRepl({
     provider,
-    tools: [...createTools({ todos }), task, createSkillTool(skills)],
+    tools: [...mainTools, task],
     system: [
       SYSTEM_PROMPT,
       renderInstructionsForModel(instructions),
